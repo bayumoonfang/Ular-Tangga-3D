@@ -10,6 +10,7 @@ import { CharacterSelect } from './ui/CharacterSelect';
 import { ChatPanel } from './ui/ChatPanel';
 import { HUD } from './ui/HUD';
 import { ConnectionOverlay } from './ui/ConnectionOverlay';
+import { FightOverlay } from './ui/FightOverlay';
 import { Lobby } from './ui/Lobby';
 import { Loading } from './ui/Loading';
 import { MainMenu } from './ui/MainMenu';
@@ -123,8 +124,19 @@ async function boot(): Promise<void> {
       game.exit();
       goMenu();
     },
+    onKick: (id) => net.send({ t: 'kick', playerId: id }),
   });
-  bus.on('pause', ({ paused }) => (paused ? pause.show() : pause.hide()));
+  /** host online: daftar pemain yang bisa dikeluarkan di menu */
+  const syncPauseRoster = () => {
+    const room = net.room;
+    pause.setRoster(game.online && room && net.isHost && !net.isSpectator ? room.players.filter((p) => p.id !== net.myId) : []);
+  };
+  bus.on('pause', ({ paused }) => {
+    if (paused) {
+      syncPauseRoster();
+      pause.show();
+    } else pause.hide();
+  });
 
   const hud = new HUD(game, {
     onPause: () => game.togglePause(),
@@ -151,6 +163,8 @@ async function boot(): Promise<void> {
     },
   });
 
+  const fight = new FightOverlay(net, game, audio);
+
   const netOverlay = new ConnectionOverlay(net, {
     onLeave: () => {
       net.leave();
@@ -162,7 +176,7 @@ async function boot(): Promise<void> {
   });
 
   // chat sebelum modal: aturan CSS .modal:nth-last-child menumpuk modal terakhir paling atas
-  uiRoot.append(menu.el, setup.el, lobby.el, hud.el, victory.el, chat.el, pause.el, howTo.el, settingsPanel.el, netOverlay.el);
+  uiRoot.append(menu.el, setup.el, lobby.el, hud.el, fight.el, victory.el, chat.el, pause.el, howTo.el, settingsPanel.el, netOverlay.el);
 
   // suara tombol (delegasi)
   uiRoot.addEventListener('click', (e) => {
@@ -230,7 +244,16 @@ async function boot(): Promise<void> {
       lobby.show();
     }
   });
+  net.on('kicked', () => {
+    // dikeluarkan host: kembali ke layar buat/gabung room (pesan tampil di lobby)
+    autoRejoin = false;
+    pause.hide();
+    victory.hide();
+    if (game.online) game.exit();
+    lobby.show();
+  });
   net.on('room_state', ({ room }) => {
+    syncPauseRoster();
     // room kembali ke lobby saat permainan masih berjalan = lawan semua keluar
     if (game.online && room.phase === 'lobby' && game.machine.phase !== 'GAME_OVER') {
       game.exit();

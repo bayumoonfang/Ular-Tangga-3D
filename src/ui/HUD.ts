@@ -33,6 +33,8 @@ export class HUD {
   private exprToggle = h('button', { class: 'icon-btn expr-toggle', 'aria-haspopup': 'menu', onclick: () => this.toggleExpressions() }, icon('smile'));
   private exprDock = h('div', { class: 'expr-dock' }, this.exprPop, this.exprToggle);
   private livePill = h('div', { class: 'live-pill hidden' });
+  /** online: menunggu pemain pengganti / slot kosong yang bisa diisi */
+  private notice = h('div', { class: 'hud-notice hidden' });
   private chargeFill = h('i');
   private charge = h(
     'div',
@@ -66,6 +68,7 @@ export class HUD {
       this.players,
       controls,
       this.livePill,
+      this.notice,
       this.banner,
       this.dicePop,
       this.log,
@@ -109,6 +112,13 @@ export class HUD {
     bus.on('net:room', ({ room }) => {
       for (const p of room.players) this.cards.get(p.id)?.el.classList.toggle('offline', !p.connected);
       this.renderLive(room.viewers.length);
+      this.renderNotice();
+      this.updateRoll();
+    });
+    bus.on('fight:start', () => this.updateRoll());
+    bus.on('fight:end', () => {
+      this.refresh();
+      this.updateRoll();
     });
     bus.on('expression', ({ playerId, spectator, id }) => {
       if (!spectator) this.cardBubble(playerId, id);
@@ -228,6 +238,7 @@ export class HUD {
     this.toggleExpressions(false);
     setVisible(this.livePill, online);
     this.renderLive(this.game.online?.room?.viewers.length ?? 0);
+    this.renderNotice();
     for (const p of this.game.state.players) {
       const emoji = CHARACTERS.find((c) => c.id === p.character)?.emoji ?? '🎲';
       const info = h('small');
@@ -307,6 +318,21 @@ export class HUD {
     );
   }
 
+  private renderNotice(): void {
+    const room = this.game.online?.room;
+    const text =
+      !room || room.phase !== 'playing'
+        ? ''
+        : room.waiting
+          ? t('hud.waitPlayers', { code: room.code })
+          : room.openSlots > 0
+            ? t('hud.openSlots', { n: room.openSlots, code: room.code })
+            : '';
+    this.notice.textContent = text;
+    this.notice.classList.toggle('waiting', !!room?.waiting);
+    setVisible(this.notice, !!text);
+  }
+
   private hide(): void {
     this.visible = false;
     this.cancelCharge();
@@ -333,13 +359,14 @@ export class HUD {
     const phase = g.machine.phase;
     const player = g.state.players.find((p) => p.id === this.activeId) ?? g.state.players[g.state.current];
     const mine = g.isMine(player.id);
-    const ready = mine && phase === 'AWAIT_ROLL' && !g.state.winnerId;
+    const ready = mine && phase === 'AWAIT_ROLL' && !g.state.winnerId && !g.rollBlocked;
     this.rollBtn.disabled = !ready;
     this.rollBtn.classList.toggle('ready', ready);
     const label = ready ? t('hud.roll') : phase === 'ROLLING' ? t('hud.rolling') : mine ? t('hud.roll') : t('hud.botTurn', { name: player.name });
     this.rollBtn.replaceChildren(...(mine ? [icon('dice')] : []), h('span', null, label));
     if (ready && this.chargeStart === null) this.hint.textContent = t('hud.holdShort');
-    else if (!ready && this.chargeStart === null) this.hint.textContent = g.online?.isSpectator ? t('live.watchingHint') : '';
+    else if (!ready && this.chargeStart === null)
+      this.hint.textContent = g.fightActive ? t('hud.fightWait') : g.online?.isSpectator ? t('live.watchingHint') : '';
     this.charge.classList.toggle('ready', ready);
     if (!ready) this.charge.classList.remove('overheat');
     setVisible(this.rollBtn, phase !== 'GAME_OVER');
@@ -349,7 +376,8 @@ export class HUD {
   /** Sisa waktu giliran (hanya online, saat menunggu lemparan). */
   private tickTimer(): void {
     const g = this.game;
-    const show = !!g.online && this.visible && !!this.deadline && g.machine.phase === 'AWAIT_ROLL' && this.deadline.playerId === this.activeId;
+    const show =
+      !!g.online && this.visible && !!this.deadline && g.machine.phase === 'AWAIT_ROLL' && this.deadline.playerId === this.activeId && !g.rollBlocked;
     setVisible(this.timer, show);
     if (!show || !this.deadline) return;
     const secs = Math.max(0, Math.ceil((this.deadline.at - Date.now()) / 1000));

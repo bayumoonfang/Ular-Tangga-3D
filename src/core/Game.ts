@@ -35,6 +35,9 @@ const DEV_SPEED = import.meta.env.DEV ? Number(new URLSearchParams(location.sear
 class Cancelled extends Error {}
 
 type TurnResult = Extract<ServerMsg, { t: 'turn_result' }>;
+type FightEnd = Extract<ServerMsg, { t: 'fight_end' }>;
+/** lama layar hasil duel tampil sebelum yang kalah melompat ke Start (dtk) */
+const FIGHT_RESULT_SECONDS = 2.2;
 
 export function readSave(): SaveData | null {
   try {
@@ -74,6 +77,12 @@ export class Game {
   private offs: (() => void)[] = [];
   private results: TurnResult[] = [];
   private resultWaiter: (() => void) | null = null;
+  /** duel sedang berlangsung (lempar dadu ditahan) */
+  fightActive = false;
+  /** hasil lemparan berlabel duel yang hasil duelnya belum diproses giliran */
+  private fightsAwaited = 0;
+  private fightEnds: FightEnd[] = [];
+  private fightWaiter: (() => void) | null = null;
 
   constructor(
     readonly bus: EventBus,
@@ -125,8 +134,28 @@ export class Game {
     this.results = [];
     this.offs = [
       net.on('turn_result', (m) => {
+        if (m.fight) this.fightsAwaited++;
         this.results.push(m);
         this.resultWaiter?.();
+      }),
+      net.on('fight_start', ({ fight }) => {
+        this.fightActive = true;
+        // kamera ke petak duel agar semua anggota room (pemain lain & penonton) melihat pertarungannya
+        if (this.stage.characters.has(fight.fighters[0])) this.stage.focusPlayer(fight.fighters[0]);
+        for (const id of fight.fighters) this.stage.characters.get(id)?.showEmote('⚔️', 1600);
+        this.bus.emit('fight:start', { fighters: fight.fighters });
+      }),
+      net.on('fight_hit', (m) => this.showFightHit(m.playerId, m.damage, Object.keys(m.hp))),
+      net.on('fight_end', (m) => {
+        this.fightActive = false;
+        if (this.fightsAwaited > 0) {
+          // giliran yang memicu duel akan memprosesnya setelah animasi langkah selesai
+          this.fightEnds.push(m);
+          this.fightWaiter?.();
+        } else {
+          // masuk kembali di tengah duel: tidak ada giliran yang menunggu, langsung terapkan
+          this.applyFightEnd(m, this.token).catch(() => undefined); // dibatalkan bila game keluar
+        }
       }),
       net.on('turn', ({ playerId, deadline }) => this.bus.emit('turn:deadline', { playerId, deadline })),
       // siaran server sampai ke semua anggota room, termasuk pengirimnya sendiri
@@ -201,6 +230,10 @@ export class Game {
     this.menuOpen = false;
     this.results = [];
     this.resultWaiter = null;
+    this.fightActive = false;
+    this.fightsAwaited = 0;
+    this.fightEnds = [];
+    this.fightWaiter = null;
     gsap.globalTimeline.clear();
     gsap.globalTimeline.paused(false).timeScale(DEV_SPEED);
     this.scene.timeScale = 1;
@@ -238,7 +271,12 @@ export class Game {
   }
 
   canRoll(): boolean {
-    return this.machine.phase === 'AWAIT_ROLL' && this.humanTurn && !this.paused && this.human.waiting;
+    return this.machine.phase === 'AWAIT_ROLL' && this.humanTurn && !this.paused && this.human.waiting && !this.rollBlocked;
+  }
+
+  /** Online: lempar ditahan selama duel atau saat menunggu pemain pengganti bergabung. */
+  get rollBlocked(): boolean {
+    return this.fightActive || !!this.online?.room?.waiting;
   }
 
   requestRoll(input: RollInput = { boost: false }): void {
@@ -266,6 +304,58 @@ export class Game {
       };
       take();
     });
+  }
+
+  private nextFightEnd(): Promise<FightEnd> {
+    return new Promise((resolve) => {
+      const take = () => {
+        const r = this.fightEnds.shift();
+        if (r) {
+          this.fightWaiter = null;
+          resolve(r);
+        } else {
+          this.fightWaiter = take;
+        }
+      };
+      take();
+    });
+  }
+
+  /** Hasil duel: setelah layar hasil tampil, yang kalah melompat kembali ke Start. */
+  private async applyFightEnd(end: FightEnd, token: number): Promise<void> {
+    const losers = end.losers.filter((id) => this.stage.characters.has(id));
+    for (const id of losers) {
+      const p = this.state.players.find((x) => x.id === id);
+      if (p) p.position = 0;
+    }
+    if (end.winnerId && this.stage.characters.has(end.winnerId)) void this.stage.pulsePose(end.winnerId, 'cheer', 1.6);
+    for (const id of losers) void this.stage.pulsePose(id, 'sad', 1.6);
+    if (losers.length) {
+      await this.stage.sleep(FIGHT_RESULT_SECONDS);
+      this.check(token);
+      await Promise.all(losers.map((id) => this.stage.sendHome(id)));
+      this.check(token);
+      const names = losers.map((id) => this.state.players.find((p) => p.id === id)?.name ?? '?').join(', ');
+      this.bus.emit('ui:log', { text: t('fight.home', { names }) });
+    }
+    this.bus.emit('fight:end', { winnerId: end.winnerId, losers });
+  }
+
+  /** Serangan duel tampil di papan 3D: penyerang bersorak, lawan terkena pukulan (miss = embusan angin). */
+  private showFightHit(attacker: string, damage: number, fighters: string[]): void {
+    const chars = this.stage.characters;
+    if (!chars.has(attacker)) return;
+    if (damage <= 0) {
+      chars.get(attacker)!.showEmote('💨', 900);
+      return;
+    }
+    void this.stage.pulsePose(attacker, 'cheer', 0.5);
+    chars.get(attacker)!.showEmote(damage >= 30 ? '🔥' : '👊', 900);
+    for (const id of fighters) {
+      if (id === attacker || !chars.has(id)) continue;
+      void this.stage.pulsePose(id, 'scared', 0.5);
+      chars.get(id)!.showEmote('💥', 900);
+    }
   }
 
   /** Simulasi lokal harus sama dengan server; bila tidak, ikuti server (ia yang berwenang). */
@@ -311,6 +401,7 @@ export class Game {
     let boost = false;
     let value: number;
     let serverAfter: TurnResult['after'] | null = null;
+    let fight = false;
     if (this.online) {
       // server authoritative: pemain yang gilirannya mengirim niat 'roll', hasilnya datang dari server
       if (mine) {
@@ -327,6 +418,7 @@ export class Game {
       value = res.value;
       boost = res.boost;
       serverAfter = res.after;
+      fight = !!res.fight;
     } else {
       if (player.isBot) {
         await this.stage.sleep(this.ais.get(id)!.thinkTime());
@@ -400,6 +492,15 @@ export class Game {
     }
     this.check(token);
     this.bus.emit('move:step', { playerId: id, tile: move.final, stepIndex: move.path.length, total: move.path.length });
+
+    // 4b) duel (online): berhenti di petak yang ditempati pemain lain
+    if (fight) {
+      const end = await this.nextFightEnd();
+      this.fightsAwaited = Math.max(0, this.fightsAwaited - 1);
+      this.check(token);
+      await this.applyFightEnd(end, token);
+      this.check(token);
+    }
 
     // 5) menang / lempar lagi / giliran berikutnya
     this.machine.go('CHECK_WIN');

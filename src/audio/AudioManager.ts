@@ -28,6 +28,13 @@ export type SfxId =
   | 'tick'
   | 'perfect'
   | 'fizzle'
+  | 'fight_count'
+  | 'fight_go'
+  | 'arrow_ok'
+  | 'arrow_bad'
+  | 'fight_hit'
+  | 'fight_miss'
+  | 'fight_ko'
   // ekspresi (arg = pengali volume, 0 = penuh)
   | 'x_clap'
   | 'x_laugh'
@@ -753,6 +760,35 @@ export class AudioManager {
         break;
       case 'pop':
         this.tone(500, t, 0.08, 'sine', 0.25, o, 1200, 0.05);
+        break;
+      // ── duel ──
+      case 'fight_count': // ketukan hitung mundur 3-2-1
+        this.tone(880, t, 0.12, 'square', 0.12, o, undefined, 0.05);
+        this.noise(t, 0.05, 'highpass', 5000, 0.08, o);
+        break;
+      case 'fight_go':
+        this.crash(t, o);
+        this.brass(hz(62), t, 0.25, 0.12, o, false);
+        this.brass(hz(69), t + 0.12, 0.6, 0.14, o, false);
+        break;
+      case 'arrow_ok': // arg = urutan panah, nada naik
+        this.bell(hz(76 + (arg % 8) * 2), t, 0.18, 0.13, o);
+        break;
+      case 'arrow_bad':
+        this.tone(180, t, 0.18, 'sawtooth', 0.12, o, 90, 0);
+        break;
+      case 'fight_hit': // arg = kekuatan 0..1 (perfect = 1)
+        this.noise(t, 0.12, 'lowpass', 1800 + arg * 2000, 0.45 + arg * 0.2, o, 300);
+        this.tone(160, t, 0.16, 'sine', 0.5, o, 50, 0.05);
+        if (arg >= 1) [84, 88, 91].forEach((m, k) => this.bell(hz(m), t + 0.05 + k * 0.04, 0.5, 0.12, o));
+        break;
+      case 'fight_miss':
+        this.noise(t, 0.25, 'bandpass', 900, 0.15, o, 400, 1.5);
+        break;
+      case 'fight_ko':
+        this.noise(t, 0.3, 'lowpass', 1200, 0.6, o, 120);
+        this.tone(120, t, 0.5, 'sine', 0.6, o, 40, 0.05);
+        this.crash(t + 0.05, o);
         break;
       default:
         this.playExpressionSfx(id, t, arg || 1);

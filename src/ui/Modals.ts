@@ -1,3 +1,4 @@
+import { CHARACTERS } from '../config';
 import { onLangChange, t } from '../i18n';
 import { settings, type Lang, type QualitySetting } from '../utils/settings';
 import { h, setVisible } from './dom';
@@ -85,7 +86,7 @@ export class HowToPlay extends Modal {
         'div',
         { class: 'modal-card' },
         h('h2', null, icon('help'), t('howto.title')),
-        h('ol', { class: 'howto' }, ...[1, 2, 3, 4, 5, 6, 7].map((n) => h('li', null, t(`howto.${n}`)))),
+        h('ol', { class: 'howto' }, ...[1, 2, 3, 4, 5, 6, 7, 8].map((n) => h('li', null, t(`howto.${n}`)))),
         h('button', { class: 'btn primary', onclick: () => this.hide() }, t('howto.close')),
       ),
     );
@@ -102,8 +103,18 @@ export class PauseMenu extends Modal {
 
   private online = false;
   private spectator = false;
+  /** host online: pemain lain yang bisa dikeluarkan (kosong = bagian disembunyikan) */
+  private roster: { id: string; name: string; character: string }[] = [];
+  private kickConfirm = '';
+  private kickTimer = 0;
 
-  constructor(private cb: { onResume(): void; onSettings(): void; onQuit(): void }) {
+  setRoster(list: { id: string; name: string; character: string }[]): void {
+    this.roster = list;
+    if (!list.some((p) => p.id === this.kickConfirm)) this.kickConfirm = '';
+    this.render();
+  }
+
+  constructor(private cb: { onResume(): void; onSettings(): void; onQuit(): void; onKick(id: string): void }) {
     super();
     onLangChange(() => this.render());
     this.render();
@@ -118,7 +129,47 @@ export class PauseMenu extends Modal {
         h('button', { class: 'btn primary big', onclick: () => this.cb.onResume() }, icon('play'), t('pause.resume')),
         h('button', { class: 'btn big', onclick: () => this.cb.onSettings() }, icon('settings'), t('pause.settings')),
         h('button', { class: 'btn danger big', onclick: () => this.cb.onQuit() }, icon('exit'), t(this.spectator ? 'live.stop' : this.online ? 'pause.leave' : 'pause.quit')),
+        this.roster.length ? this.rosterView() : null,
       ),
     );
+  }
+
+  private rosterView(): HTMLElement {
+    return h(
+      'div',
+      { class: 'pause-roster' },
+      h('span', { class: 'hint' }, t('pause.players')),
+      ...this.roster.map((p) => {
+        const confirming = this.kickConfirm === p.id;
+        return h(
+          'div',
+          { class: 'roster-row' },
+          h('span', { class: 'roster-emoji' }, CHARACTERS.find((c) => c.id === p.character)?.emoji ?? '🎲'),
+          h('b', null, p.name),
+          h(
+            'button',
+            { class: `btn sm ${confirming ? 'danger' : ''}`, onclick: () => this.kick(p.id) },
+            icon('kick'),
+            confirming ? t('lobby.kickConfirm') : t('lobby.kick'),
+          ),
+        );
+      }),
+    );
+  }
+
+  /** Klik pertama meminta konfirmasi, klik kedua (dalam 3 dtk) mengeluarkan pemain. */
+  private kick(id: string): void {
+    window.clearTimeout(this.kickTimer);
+    if (this.kickConfirm === id) {
+      this.kickConfirm = '';
+      this.cb.onKick(id);
+    } else {
+      this.kickConfirm = id;
+      this.kickTimer = window.setTimeout(() => {
+        this.kickConfirm = '';
+        this.render();
+      }, 3000);
+    }
+    this.render();
   }
 }

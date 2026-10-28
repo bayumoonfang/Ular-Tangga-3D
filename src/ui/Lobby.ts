@@ -32,6 +32,9 @@ export class Lobby {
   private livePoll = 0;
   /** nama kosong saat mencoba menonton: kolom nama disorot */
   private nameInvalid = false;
+  /** host menekan Keluarkan sekali: tombol meminta konfirmasi (id pemain) */
+  private kickConfirm = '';
+  private kickTimer = 0;
 
   constructor(
     private net: NetworkClient,
@@ -55,6 +58,11 @@ export class Lobby {
       this.render();
     });
     net.on('room_state', () => this.render());
+    net.on('kicked', () => {
+      this.busy = false;
+      this.showError(t('net.kicked'));
+      this.requestLive();
+    });
     net.on('left', () => {
       this.render();
       this.requestLive();
@@ -241,6 +249,29 @@ export class Lobby {
     this.net.send({ t: 'spectate', code, name: this.name.trim() });
   }
 
+  /** Gabung sebagai pemain (lobby, atau slot kosong di tengah permainan — mulai dari Start). */
+  private join(code: string): void {
+    this.saveProfile();
+    this.busy = true;
+    this.net.send({ t: 'join_room', code, name: this.name, character: this.character });
+  }
+
+  /** Host: klik pertama meminta konfirmasi, klik kedua (dalam 3 dtk) mengeluarkan pemain. */
+  private kick(id: string): void {
+    window.clearTimeout(this.kickTimer);
+    if (this.kickConfirm !== id) {
+      this.kickConfirm = id;
+      this.kickTimer = window.setTimeout(() => {
+        this.kickConfirm = '';
+        this.render();
+      }, 3000);
+    } else {
+      this.kickConfirm = '';
+      this.net.send({ t: 'kick', playerId: id });
+    }
+    this.render();
+  }
+
   private entryView(): HTMLElement {
     const online = this.net.status === 'connected';
     const nameInput = h('input', {
@@ -298,11 +329,7 @@ export class Lobby {
       {
         class: 'btn big',
         disabled: !online || this.busy || this.codeInput.length < ROOM_CODE_LENGTH,
-        onclick: () => {
-          this.saveProfile();
-          this.busy = true;
-          this.net.send({ t: 'join_room', code: this.codeInput, name: this.name, character: this.character });
-        },
+        onclick: () => this.join(this.codeInput),
       },
       icon('users'),
       t('lobby.join'),
@@ -362,6 +389,9 @@ export class Lobby {
           h('small', { class: 'hint' }, t('live.meta', { code: r.code, turn: r.turn })),
         ),
         h('span', { class: 'live-viewers', title: t('live.viewers', { n: r.viewers }) }, icon('eye'), String(r.viewers)),
+        r.openSlots > 0
+          ? h('button', { class: 'btn sm primary', disabled: !online || this.busy, onclick: () => this.join(r.code) }, icon('users'), t('live.joinSlot', { n: r.openSlots }))
+          : null,
         h('button', { class: 'btn sm accent', disabled: !online || this.busy, onclick: () => this.spectate(r.code) }, icon('eye'), t('live.watch')),
       ),
     );
@@ -407,11 +437,27 @@ export class Lobby {
         p.id === this.net.myId ? h('span', { class: 'badge you' }, t('lobby.you')) : null,
         !p.connected ? h('span', { class: 'badge off' }, t('lobby.offline')) : p.isHost ? null : h('span', { class: `badge ${p.ready ? 'ok' : 'wait'}` }, p.ready ? t('lobby.ready') : t('lobby.notReady')),
       ];
+      const confirming = this.kickConfirm === p.id;
+      const kickBtn =
+        isHost && p.id !== this.net.myId
+          ? h(
+              'button',
+              {
+                class: `slot-kick ${confirming ? 'confirm' : ''}`,
+                title: t('lobby.kick'),
+                'aria-label': `${t('lobby.kick')} ${p.name}`,
+                onclick: () => this.kick(p.id),
+              },
+              icon('kick'),
+              confirming ? h('span', null, t('lobby.kickConfirm')) : null,
+            )
+          : null;
       return h(
         'div',
         { class: `slot ${p.connected ? '' : 'offline'}`, style: { '--c': hex(p.color) } },
         h('div', { class: 'slot-avatar' }, emojiOf(p.character)),
         h('div', { class: 'slot-info' }, h('b', null, p.name), h('div', { class: 'badges' }, ...badges)),
+        kickBtn,
       );
     });
 
@@ -427,6 +473,8 @@ export class Lobby {
           ))),
           this.toggle(t('setup.sixAgain'), room.settings.options.sixRollsAgain, (v) => this.net.send({ t: 'settings', options: { sixRollsAgain: v } })),
           this.toggle(t('setup.exact'), room.settings.options.exactFinish, (v) => this.net.send({ t: 'settings', options: { exactFinish: v } })),
+          this.toggle(t('lobby.fight'), room.settings.fight, (v) => this.net.send({ t: 'settings', fight: v })),
+          h('small', { class: 'hint toggle-hint' }, t('lobby.fightHint')),
         )
       : h(
           'div',
@@ -436,6 +484,7 @@ export class Lobby {
             h('span', { class: 'tag' }, t('setup.board') + ': ' + t(`board.${room.settings.boardPreset}`)),
             h('span', { class: 'tag' }, (room.settings.options.sixRollsAgain ? '✓ ' : '✗ ') + t('setup.sixAgain')),
             h('span', { class: 'tag' }, (room.settings.options.exactFinish ? '✓ ' : '✗ ') + t('setup.exact')),
+            h('span', { class: 'tag' }, (room.settings.fight ? '✓ ⚔️ ' : '✗ ⚔️ ') + t('lobby.fightTag')),
           ),
         );
 

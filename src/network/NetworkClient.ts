@@ -145,6 +145,7 @@ export class NetworkClient {
         if (this.session) this.saveSession({ ...this.session, at: Date.now() }); // sesi tetap segar selama bermain
         break;
       case 'left':
+      case 'kicked':
         this.clearRoom();
         break;
       case 'error':

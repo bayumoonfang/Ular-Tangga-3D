@@ -176,6 +176,18 @@ export class Stage {
     if (from !== tile) this.layoutTile(from);
   }
 
+  /** Kalah duel: pion terlempar dengan lompatan tinggi kembali ke Start. */
+  async sendHome(id: string): Promise<void> {
+    const ch = this.char(id);
+    const from = ch.tile;
+    if (from <= 0) return;
+    this.effects.sparkle(ch.root.position.clone(), 0xff6b6b, 14);
+    ch.tile = 0;
+    this.layoutTile(from);
+    await ch.hopTo(this.slotPosition(0, id), 1.1, 3.2);
+    ch.faceCamera();
+  }
+
   /** Rapikan pion di petak tujuan setelah seluruh gerakan selesai. */
   settle(id: string): void {
     const ch = this.char(id);

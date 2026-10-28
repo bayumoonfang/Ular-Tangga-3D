@@ -5,8 +5,9 @@ import { Server } from 'socket.io';
 import { io as connect, type Socket } from 'socket.io-client';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { GameState } from '../src/core/GameState';
-import { applyRoll } from '../src/core/Rules';
-import type { ClientMsg, RoomInfo, ServerMsg } from '../src/network/protocol';
+import { applyRoll, rollDie } from '../src/core/Rules';
+import { FIGHT_HIT_AT, fightDamage, judgeBeat, type ClientMsg, type RoomInfo, type ServerMsg } from '../src/network/protocol';
+import { createRng } from '../src/utils/random';
 
 // jeda server dipercepat 100x agar permainan penuh selesai dalam detik
 process.env.SL3D_TIME_SCALE = '0.01';
@@ -47,6 +48,7 @@ class TestClient {
         this.room = m.room;
       } else if (m.t === 'room_state') this.room = m.room;
       else if (m.t === 'game_start' || m.t === 'game_snapshot') this.state = m.state;
+      else if (m.t === 'kicked') this.room = null;
     });
   }
 
@@ -508,5 +510,278 @@ describe('live: penonton & chat', () => {
     late.send({ t: 'spectate', code: host.room!.code, name: 'Telat' });
     expect((await late.wait('error')).message).toMatch(/tidak ditemukan/);
     [host, b, v, late].forEach((c) => c.close());
+  });
+});
+
+describe('kick & slot kosong', () => {
+  it('hanya host yang boleh kick; yang di-kick menerima pesan kicked dan keluar dari room', async () => {
+    const [host, b, c] = await makeRoom(3);
+    b.send({ t: 'kick', playerId: c.me });
+    expect((await b.wait('error')).message).toMatch(/host/);
+    host.send({ t: 'kick', playerId: host.me });
+    expect((await host.wait('error')).message).toMatch(/diri sendiri/);
+    host.send({ t: 'kick', playerId: c.me });
+    await c.wait('kicked');
+    await new Promise((r) => setTimeout(r, 60));
+    expect(host.room!.players.map((p) => p.id)).not.toContain(c.me);
+    // sambungan yang di-kick tidak lagi terikat ke room
+    const from = c.msgs.length;
+    c.send({ t: 'ready', ready: true });
+    expect((await c.wait('error', 2000, from)).message).toMatch(/belum berada/);
+    [host, b, c].forEach((x) => x.close());
+  });
+
+  it('kick saat bermain: pion diangkat, slot kosong bisa diisi pemain baru yang mulai dari Start', async () => {
+    const [host, b, c] = await startGame(3);
+    const from = host.msgs.length;
+    host.send({ t: 'kick', playerId: c.me });
+    await c.wait('kicked');
+    const snap = await host.wait('game_snapshot', 3000, from);
+    expect(snap.state.players.map((p) => p.id)).not.toContain(c.me);
+    await new Promise((r) => setTimeout(r, 40));
+    expect(host.room!.openSlots).toBe(1);
+    expect(host.room!.waiting).toBe(false);
+
+    const d = await open();
+    d.send({ t: 'join_room', code: host.room!.code, name: 'Dodi', character: 'kiko' });
+    const joined = await d.wait('joined');
+    const dsnap = await d.wait('game_snapshot');
+    const me = dsnap.state.players.find((p) => p.id === joined.you)!;
+    expect(me.position).toBe(0);
+    expect(dsnap.state.players).toHaveLength(3);
+    // karakter tidak bentrok dengan pemain yang tersisa
+    expect(new Set(dsnap.state.players.map((p) => p.character)).size).toBe(3);
+    await new Promise((r) => setTimeout(r, 40));
+    expect(host.room!.openSlots).toBe(0);
+
+    // slot sudah terisi: pemain lain ditolak
+    const e = await open();
+    e.send({ t: 'join_room', code: host.room!.code, name: 'Eka', character: 'kiko' });
+    expect((await e.wait('error')).message).toMatch(/sudah dimulai/);
+    [host, b, c, d, e].forEach((x) => x.close());
+  });
+
+  it('tinggal 1 pemain setelah kick: permainan menunggu, lalu lanjut saat ada yang bergabung', async () => {
+    const [host, b] = await startGame(2);
+    const from = host.msgs.length;
+    host.send({ t: 'kick', playerId: b.me });
+    await b.wait('kicked');
+    await host.wait('game_snapshot', 3000, from);
+    await new Promise((r) => setTimeout(r, 40));
+    expect(host.room!.phase).toBe('playing');
+    expect(host.room!.waiting).toBe(true);
+    host.send({ t: 'roll' });
+    expect((await host.wait('error', 2000, from)).message).toMatch(/Menunggu/);
+
+    const d = await open();
+    const turnFrom = host.msgs.length;
+    d.send({ t: 'join_room', code: host.room!.code, name: 'Dodi', character: 'kiko' });
+    await d.wait('joined');
+    await host.wait('turn', 3000, turnFrom);
+    expect(host.room!.waiting).toBe(false);
+    // giliran berjalan lagi (AFK = dilempar otomatis)
+    await host.wait('turn_result', 3000, turnFrom);
+    [host, b, d].forEach((x) => x.close());
+  });
+
+  it('pemain keluar saat bermain juga membuka slot', async () => {
+    const [host, b, c] = await startGame(3);
+    c.send({ t: 'leave' });
+    await new Promise((r) => setTimeout(r, 60));
+    expect(host.room!.openSlots).toBe(1);
+    expect(host.state!.players).toHaveLength(2);
+    [host, b, c].forEach((x) => x.close());
+  });
+});
+
+describe('duel', () => {
+  it('penilaian & damage: miss tanpa serangan, perfect lebih besar, combo menambah damage', () => {
+    expect(judgeBeat(FIGHT_HIT_AT)).toBe('perfect');
+    expect(judgeBeat(FIGHT_HIT_AT + 0.04)).toBe('great');
+    expect(judgeBeat(FIGHT_HIT_AT - 0.07)).toBe('cool');
+    expect(judgeBeat(FIGHT_HIT_AT + 0.12)).toBe('bad');
+    expect(judgeBeat(0.3)).toBe('miss');
+    expect(fightDamage(5, 'miss', 0)).toBe(0);
+    expect(fightDamage(5, 'perfect', 1)).toBeGreaterThan(fightDamage(5, 'cool', 1));
+    expect(fightDamage(5, 'perfect', 4)).toBeGreaterThan(fightDamage(5, 'perfect', 1));
+  });
+
+  it('berhenti di petak lawan memicu duel; HP lebih tinggi menang, yang kalah kembali ke Start', async () => {
+    const { Room } = await import('../server/Room');
+    const sent: ServerMsg[] = [];
+    const room = new Room('DUEL01', (sid, msg) => sid === 'sa' && sent.push(msg), () => {});
+    const a = room.add('sa', 'Ana', 'kiko');
+    const b = room.add('sb', 'Budi', 'bobo');
+    room.updateSettings(a.id, undefined, undefined, true);
+    room.setReady(b.id, true);
+    room.start(a.id);
+    const state = (room as unknown as { state: GameState }).state;
+    state.board = { ladders: {}, snakes: {} };
+    const mover = state.players[state.current];
+    const rival = state.players[1 - state.current];
+    mover.position = 10;
+    // lemparan berikutnya sudah bisa dihitung dari RNG state: taruh lawan tepat di petak tujuan
+    const rng = createRng(1);
+    rng.setState(state.rngState);
+    rival.position = 10 + rollDie(rng, false);
+    const target = rival.position;
+
+    const waitFor = async <T extends ServerMsg['t']>(t: T): Promise<Extract<ServerMsg, { t: T }>> => {
+      for (let i = 0; i < 400; i++) {
+        const m = sent.find((x) => x.t === t);
+        if (m) return m as Extract<ServerMsg, { t: T }>;
+        await new Promise((r) => setTimeout(r, 5));
+      }
+      throw new Error(`timeout menunggu ${t}`);
+    };
+    room.handleRoll(mover.id);
+    expect((await waitFor('turn_result')).fight).toBe(true);
+    const { fight } = await waitFor('fight_start');
+    expect(fight.fighters).toEqual([mover.id, rival.id]);
+    expect(fight.rounds).toHaveLength(6);
+
+    // input ronde yang belum dimulai ditolak
+    room.fightInput(mover.id, fight.id, 3, 'perfect');
+    expect(sent.some((m) => m.t === 'fight_hit')).toBe(false);
+    await new Promise((r) => setTimeout(r, fight.startsIn + 3));
+    room.fightInput(mover.id, fight.id, 0, 'perfect');
+    const hit = await waitFor('fight_hit');
+    expect(hit.damage).toBeGreaterThan(0);
+    expect(hit.hp[rival.id]).toBe(100 - hit.damage);
+    // input ganda untuk ronde yang sama diabaikan
+    room.fightInput(mover.id, fight.id, 0, 'perfect');
+    expect(sent.filter((m) => m.t === 'fight_hit' && m.playerId === mover.id && m.round === 0)).toHaveLength(1);
+
+    // lawan tidak pernah menekan apa pun: semua ronde miss, waktu habis → lawan kalah
+    const end = await waitFor('fight_end');
+    expect(end.winnerId).toBe(mover.id);
+    expect(end.losers).toEqual([rival.id]);
+    const after = (room as unknown as { state: GameState }).state;
+    expect(after.players.find((p) => p.id === rival.id)!.position).toBe(0);
+    expect(after.players.find((p) => p.id === mover.id)!.position).toBe(target);
+    // giliran berlanjut setelah duel
+    sent.length = 0;
+    await waitFor('turn');
+    room.destroy();
+  });
+
+  it('tanpa opsi duel: berhenti di petak yang sama tidak memicu duel', async () => {
+    const { Room } = await import('../server/Room');
+    const sent: ServerMsg[] = [];
+    const room = new Room('DUEL02', (sid, msg) => sid === 'sa' && sent.push(msg), () => {});
+    const a = room.add('sa', 'Ana', 'kiko');
+    const b = room.add('sb', 'Budi', 'bobo');
+    room.setReady(b.id, true);
+    room.start(a.id);
+    const state = (room as unknown as { state: GameState }).state;
+    state.board = { ladders: {}, snakes: {} };
+    const mover = state.players[state.current];
+    mover.position = 10;
+    const rng = createRng(1);
+    rng.setState(state.rngState);
+    state.players[1 - state.current].position = 10 + rollDie(rng, false);
+    room.handleRoll(mover.id);
+    const res = sent.find((m) => m.t === 'turn_result') as Extract<ServerMsg, { t: 'turn_result' }>;
+    expect(res.fight).toBeUndefined();
+    room.destroy();
+  });
+});
+
+describe('duel live di room', () => {
+  it('pemain lain & penonton di room menerima duel secara live: mulai, ketikan panah, serangan, hasil', async () => {
+    const { Room } = await import('../server/Room');
+    const inbox = new Map<string, ServerMsg[]>();
+    const room = new Room('DUEL03', (sid, msg) => {
+      if (!inbox.has(sid)) inbox.set(sid, []);
+      inbox.get(sid)!.push(msg);
+    }, () => {});
+    const a = room.add('sa', 'Ana', 'kiko');
+    const b = room.add('sb', 'Budi', 'bobo');
+    const c = room.add('sc', 'Cici', 'pipi');
+    room.addSpectator('sv', 'Vina');
+    room.updateSettings(a.id, undefined, undefined, true);
+    room.setReady(b.id, true);
+    room.setReady(c.id, true);
+    room.start(a.id);
+    const state = (room as unknown as { state: GameState }).state;
+    state.board = { ladders: {}, snakes: {} };
+    const mover = state.players[state.current];
+    const rest = state.players.filter((p) => p.id !== mover.id);
+    const [rival, bystander] = rest;
+    mover.position = 10;
+    const rng = createRng(1);
+    rng.setState(state.rngState);
+    rival.position = 10 + rollDie(rng, false);
+    bystander.position = 50;
+    const sidOf = (id: string) => ({ [a.id]: 'sa', [b.id]: 'sb', [c.id]: 'sc' })[id];
+    const watchers = [sidOf(bystander.id), 'sv']; // pemain yang tidak bertarung + penonton
+
+    const waitFor = async <T extends ServerMsg['t']>(sid: string, t: T, pred: (m: Extract<ServerMsg, { t: T }>) => boolean = () => true) => {
+      for (let i = 0; i < 400; i++) {
+        const m = (inbox.get(sid) ?? []).find((x) => x.t === t && pred(x as Extract<ServerMsg, { t: T }>));
+        if (m) return m as Extract<ServerMsg, { t: T }>;
+        await new Promise((r) => setTimeout(r, 5));
+      }
+      throw new Error(`${sid}: timeout menunggu ${t}`);
+    };
+
+    room.handleRoll(mover.id);
+    for (const sid of watchers) expect((await waitFor(sid, 'turn_result')).fight).toBe(true);
+    const { fight } = await waitFor('sv', 'fight_start');
+    expect(fight.fighters).toEqual([mover.id, rival.id]);
+    expect((await waitFor(sidOf(bystander.id), 'fight_start')).fight.id).toBe(fight.id);
+
+    // bukan petarung / ronde belum dimulai: progres tidak disiarkan
+    room.fightProgress(bystander.id, fight.id, 0, 1, false);
+    room.fightProgress(mover.id, fight.id, 0, 1, false);
+    expect(watchers.some((sid) => inbox.get(sid)!.some((m) => m.t === 'fight_progress'))).toBe(false);
+
+    await new Promise((r) => setTimeout(r, fight.startsIn + 3));
+    room.fightProgress(mover.id, fight.id, 0, 2, false);
+    room.fightProgress(rival.id, fight.id, 0, 0, true);
+    room.fightProgress(mover.id, fight.id, 0, 99, false); // di luar panjang urutan: diabaikan
+    room.fightInput(mover.id, fight.id, 0, 'great');
+    for (const sid of watchers) {
+      const prog = await waitFor(sid, 'fight_progress', (m) => m.playerId === mover.id);
+      expect(prog).toMatchObject({ round: 0, typed: 2, wrong: false });
+      expect(await waitFor(sid, 'fight_progress', (m) => m.playerId === rival.id)).toMatchObject({ typed: 0, wrong: true });
+      expect(inbox.get(sid)!.filter((m) => m.t === 'fight_progress' && m.playerId === mover.id)).toHaveLength(1);
+      const hit = await waitFor(sid, 'fight_hit', (m) => m.playerId === mover.id);
+      expect(hit.grade).toBe('great');
+      expect(hit.hp[rival.id]).toBe(100 - hit.damage);
+    }
+    // penonton yang baru masuk di tengah duel langsung mendapat duel berjalan (HP terkini)
+    const late = room.addSpectator('sw', 'Wati');
+    room.resync(late);
+    const lateStart = await waitFor('sw', 'fight_start');
+    expect(lateStart.fight.id).toBe(fight.id);
+    expect(lateStart.fight.startsIn).toBeLessThanOrEqual(0);
+    expect(lateStart.fight.hp[rival.id]).toBeLessThan(100);
+    expect(inbox.get('sw')!.some((m) => m.t === 'turn')).toBe(false);
+
+    // setelah menyerang, progres ronde itu tidak disiarkan lagi
+    room.fightProgress(mover.id, fight.id, 0, 3, false);
+    expect(inbox.get('sv')!.filter((m) => m.t === 'fight_progress' && m.playerId === mover.id)).toHaveLength(1);
+
+    for (const sid of watchers) {
+      const end = await waitFor(sid, 'fight_end');
+      expect(end).toMatchObject({ winnerId: mover.id, losers: [rival.id] });
+    }
+    room.destroy();
+  });
+
+  it('opsi duel diatur host; penonton tidak bisa mengirim progres/input duel', async () => {
+    const [host, b] = await makeRoom(2);
+    host.send({ t: 'settings', fight: true });
+    b.send({ t: 'ready', ready: true });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(host.room!.settings.fight).toBe(true);
+    const v = await open();
+    v.send({ t: 'spectate', code: host.room!.code, name: 'Vina' });
+    await v.wait('joined');
+    const from = v.msgs.length;
+    v.send({ t: 'fight_progress', id: 1, round: 0, typed: 1 });
+    expect((await v.wait('error', 2000, from)).message).toMatch(/Penonton/);
+    [host, b, v].forEach((x) => x.close());
   });
 });

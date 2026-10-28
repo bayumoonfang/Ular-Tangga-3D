@@ -19,7 +19,7 @@ interface Binding {
 }
 
 /** pesan yang hanya boleh dikirim pemain (penonton cuma menonton, chat & berekspresi) */
-const PLAYER_ONLY = new Set<ClientMsg['t']>(['set_character', 'ready', 'settings', 'start_game', 'charge_start', 'roll', 'back_to_lobby']);
+const PLAYER_ONLY = new Set<ClientMsg['t']>(['set_character', 'ready', 'settings', 'start_game', 'charge_start', 'roll', 'back_to_lobby', 'kick', 'fight_input', 'fight_progress']);
 
 /** Menghubungkan socket ke room/pemain dan meneruskan pesan client ke Room. */
 export class RoomManager {
@@ -130,7 +130,7 @@ export class RoomManager {
         this.bind(socket, room, p.id, 'player');
         this.sendTo(socket.id, { t: 'joined', room: room.info(), you: p.id, token: p.token, role: 'player', name: p.name });
         room.sendChatHistory(p);
-        room.broadcastRoom();
+        room.admitted(p); // di tengah permainan: semua anggota mendapat snapshot dengan pion baru
         return;
       }
       case 'spectate': {
@@ -189,7 +189,7 @@ export class RoomManager {
         room.setReady(playerId, !!msg.ready);
         break;
       case 'settings':
-        room.updateSettings(playerId, msg.boardPreset, msg.options);
+        room.updateSettings(playerId, msg.boardPreset, msg.options, msg.fight);
         break;
       case 'start_game':
         room.start(playerId);
@@ -211,6 +211,17 @@ export class RoomManager {
         if (me) room.resync(me);
         break;
       }
+      case 'kick': {
+        const sid = room.kick(playerId, String(msg.playerId));
+        if (sid) this.bindings.delete(sid);
+        break;
+      }
+      case 'fight_progress':
+        room.fightProgress(playerId, Number(msg.id), Number(msg.round), Number(msg.typed), !!msg.wrong);
+        break;
+      case 'fight_input':
+        room.fightInput(playerId, Number(msg.id), Number(msg.round), String(msg.grade));
+        break;
       case 'back_to_lobby':
         room.backToLobby();
         break;

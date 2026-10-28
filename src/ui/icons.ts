@@ -28,6 +28,8 @@ const PATHS = {
   smile: '<circle cx="12" cy="12" r="9"/><path d="M8 14a5 5 0 0 0 8 0"/><circle cx="9" cy="9.5" r="1" class="f"/><circle cx="15" cy="9.5" r="1" class="f"/>',
   send: '<path d="M4 12 20 4l-4.5 16-3.5-6.5z" class="f"/>',
   down: '<path d="m6 9 6 6 6-6"/>',
+  arrow: '<path d="M12 19.5V5"/><path d="M5.5 11.5 12 5l6.5 6.5"/>',
+  kick: '<circle cx="10" cy="8" r="3.4"/><path d="M3.5 19.5a6.5 6.5 0 0 1 11.5-4.2"/><path d="m16.5 14.5 5 5m0-5-5 5"/>',
   wifi: '<path d="M3 9.5a14 14 0 0 1 18 0M6 13a9.5 9.5 0 0 1 12 0M9 16.5a5 5 0 0 1 6 0"/><circle cx="12" cy="19.5" r="0.8" class="f"/>',
 } as const;
 

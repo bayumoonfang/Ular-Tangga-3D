@@ -26,6 +26,9 @@ export interface GameEvents {
   'ui:banner': { text: string; kind?: 'info' | 'bonus' | 'bad' };
   /** minor = baris rutin (hasil lemparan) yang tidak perlu masuk umpan chat online */
   'ui:log': { text: string; minor?: boolean };
+  /** duel online dimulai / selesai (yang kalah sudah kembali ke Start) */
+  'fight:start': { fighters: string[] };
+  'fight:end': { winnerId: string | null; losers: string[] };
   /** ekspresi (emote + SFX) dari pemain atau penonton */
   expression: { playerId: string; name: string; spectator: boolean; id: ExpressionId };
 }

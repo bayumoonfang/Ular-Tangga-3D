@@ -2217,3 +2217,588 @@ body.rm .reaction {
     bottom: 14px;
   }
 }
+
+/* ───────── kick (lobby & menu) ───────── */
+.slot {
+  position: relative;
+}
+.slot-kick {
+  margin-left: auto;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 34px;
+  min-width: 34px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 11px;
+  background: #f4f1ff;
+  color: var(--ink-soft);
+  font-size: 1.05rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.slot-kick span {
+  font-size: 0.78rem;
+}
+.slot-kick:hover,
+.slot-kick.confirm {
+  background: var(--bad);
+  color: #fff;
+}
+.toggle-hint {
+  display: block;
+  margin: -4px 0 0 52px;
+  font-size: 0.78rem;
+  line-height: 1.3;
+}
+.pause-roster {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 6px;
+  padding-top: 12px;
+  border-top: 2px dashed #e4defa;
+}
+.roster-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.roster-row b {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.roster-emoji {
+  font-size: 1.4rem;
+}
+
+/* ───────── HUD: menunggu pemain / slot kosong ───────── */
+.hud-notice {
+  position: absolute;
+  top: 54px;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: calc(100vw - 32px);
+  padding: 7px 16px;
+  border-radius: 99px;
+  background: rgba(255, 255, 255, 0.92);
+  color: var(--ink);
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-align: center;
+  pointer-events: none !important;
+  box-shadow: 0 4px 0 rgba(42, 35, 80, 0.15);
+}
+.hud-notice.waiting {
+  background: linear-gradient(90deg, #ffb703, #fb6f1d);
+  color: #fff;
+  animation: charge-pulse 1.4s ease-in-out infinite;
+}
+
+/* ───────── duel (Ayo Dance) ───────── */
+.fight {
+  position: absolute;
+  inset: 0;
+  z-index: 14;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  pointer-events: none;
+  background: radial-gradient(ellipse at center, rgba(30, 18, 80, 0.45), rgba(30, 18, 80, 0.1) 70%);
+  transition: opacity 0.3s ease, visibility 0.3s;
+}
+.fight.watching {
+  background: radial-gradient(ellipse at center, rgba(30, 18, 80, 0.3), transparent 70%);
+}
+.fight-card {
+  pointer-events: auto;
+  width: min(620px, 100%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 16px 18px 18px;
+  border-radius: 26px;
+  background: rgba(24, 16, 58, 0.86);
+  color: #fff;
+  box-shadow: 0 10px 0 rgba(0, 0, 0, 0.2), 0 20px 50px rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(6px);
+}
+.fight.watching .fight-card {
+  transform: scale(0.88);
+  opacity: 0.94;
+}
+.fight-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 1.5rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: #ffd166;
+  text-shadow: 0 3px 0 rgba(0, 0, 0, 0.35);
+}
+.fight-title small {
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 0;
+  color: rgba(255, 255, 255, 0.7);
+}
+.fight-head {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.fight-vs {
+  font-size: 1.3rem;
+  font-weight: 700;
+  color: #ff6b6b;
+  text-shadow: 0 2px 0 rgba(0, 0, 0, 0.4);
+}
+.fighter {
+  position: relative;
+  flex: 1 1 0;
+  min-width: 150px;
+  max-width: 260px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.1);
+  border: 2px solid var(--c);
+  transition: opacity 0.3s, transform 0.3s;
+}
+.fighter.me {
+  background: rgba(255, 255, 255, 0.18);
+}
+.fighter.down,
+.fighter.loser {
+  opacity: 0.5;
+  filter: grayscale(0.7);
+}
+.fighter.winner {
+  transform: scale(1.06);
+  box-shadow: 0 0 0 3px #ffd166, 0 0 24px rgba(255, 209, 102, 0.6);
+}
+.fighter.hurt {
+  animation: shake 0.35s ease;
+}
+.fighter.hurt .hp-bar {
+  box-shadow: 0 0 0 2px #ff4d6d;
+}
+.fighter-emoji {
+  font-size: 2rem;
+  line-height: 1;
+}
+.fighter-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.fighter-info b {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 0.95rem;
+}
+.fighter-info em {
+  font-style: normal;
+  font-size: 0.65rem;
+  padding: 1px 7px;
+  border-radius: 99px;
+  background: #ffd166;
+  color: var(--ink);
+}
+.hp-bar {
+  height: 12px;
+  border-radius: 99px;
+  background: rgba(0, 0, 0, 0.45);
+  overflow: hidden;
+  transition: box-shadow 0.2s;
+}
+.hp-bar i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  transition: width 0.35s ease;
+}
+.fighter.low .hp-bar i {
+  background: #ff4d6d !important;
+}
+.fighter-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 0.72rem;
+  color: rgba(255, 255, 255, 0.8);
+}
+.fighter-combo {
+  font-weight: 700;
+  color: #ffd166;
+}
+.fighter-pop {
+  position: absolute;
+  left: 50%;
+  top: -10px;
+  transform: translate(-50%, 0);
+  opacity: 0;
+  pointer-events: none;
+  white-space: nowrap;
+  padding: 2px 10px;
+  border-radius: 99px;
+  font-size: 0.8rem;
+  font-weight: 700;
+  background: #fff;
+  color: var(--ink);
+}
+.fighter-pop.show {
+  animation: fighter-pop 1s ease both;
+}
+@keyframes fighter-pop {
+  0% { opacity: 0; transform: translate(-50%, 6px) scale(0.7); }
+  20% { opacity: 1; transform: translate(-50%, -6px) scale(1.1); }
+  80% { opacity: 1; transform: translate(-50%, -10px) scale(1); }
+  100% { opacity: 0; transform: translate(-50%, -18px) scale(0.95); }
+}
+.fight-stage {
+  position: relative;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0 4px;
+}
+.fight-round {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.75);
+  min-height: 1.1em;
+}
+.fight-arrows {
+  display: flex;
+  gap: 8px;
+  min-height: 52px;
+}
+.fight-arrows .arrow {
+  display: grid;
+  place-items: center;
+  width: 46px;
+  height: 46px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.14);
+  border: 2px solid rgba(255, 255, 255, 0.35);
+  font-size: 1.6rem;
+  color: #fff;
+  transition: background 0.1s, transform 0.1s;
+}
+.fight-arrows .arrow.ok {
+  background: #4dabf7;
+  border-color: #a5d8ff;
+  transform: scale(1.08);
+}
+.fight-arrows.done .arrow {
+  background: #ffb703;
+  border-color: #ffe08a;
+}
+.fight-arrows.wrong {
+  animation: shake 0.3s ease;
+}
+.fight-arrows.wrong .arrow {
+  border-color: #ff4d6d;
+}
+.fight.watching .fight-arrows .arrow {
+  opacity: 0.6;
+}
+.arrow.dir-down .ico {
+  transform: rotate(180deg);
+}
+.arrow.dir-left .ico {
+  transform: rotate(-90deg);
+}
+.arrow.dir-right .ico {
+  transform: rotate(90deg);
+}
+.beat-bar {
+  position: relative;
+  width: 100%;
+  height: 22px;
+  border-radius: 99px;
+  background: rgba(0, 0, 0, 0.4);
+  border: 2px solid rgba(255, 255, 255, 0.25);
+}
+.beat-zone,
+.beat-perfect {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+}
+.beat-zone {
+  background: rgba(255, 209, 102, 0.45);
+}
+.beat-perfect {
+  background: #ffd166;
+}
+.beat-cursor {
+  position: absolute;
+  top: -7px;
+  bottom: -7px;
+  width: 6px;
+  margin-left: -3px;
+  border-radius: 3px;
+  background: #fff;
+  box-shadow: 0 0 10px #fff;
+  opacity: 0;
+}
+.fight-judge {
+  min-height: 2.2rem;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 1.8rem;
+  font-weight: 700;
+  text-shadow: 0 3px 0 rgba(0, 0, 0, 0.35);
+}
+.fight-judge.pop {
+  animation: judge-pop 0.45s ease both;
+}
+.fight-judge span {
+  font-size: 1rem;
+  color: #ffd166;
+}
+@keyframes judge-pop {
+  0% { transform: scale(0.5); opacity: 0; }
+  60% { transform: scale(1.15); opacity: 1; }
+  100% { transform: scale(1); }
+}
+.grade-perfect { color: #ffd166; }
+.grade-great { color: #69db7c; }
+.grade-cool { color: #74c0fc; }
+.grade-bad { color: #ffa8a8; }
+.grade-miss { color: #adb5bd; }
+.fighter-pop.grade-perfect { background: #ffd166; color: var(--ink); }
+.fighter-pop.grade-great { background: #69db7c; color: var(--ink); }
+.fighter-pop.grade-cool { background: #74c0fc; color: var(--ink); }
+.fighter-pop.grade-bad { background: #ffa8a8; color: var(--ink); }
+.fighter-pop.grade-miss { background: #495057; color: #fff; }
+.fight-count,
+.fight-result {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  border-radius: 18px;
+  background: rgba(24, 16, 58, 0.92);
+  pointer-events: none;
+}
+.fight-count {
+  font-size: 4rem;
+  font-weight: 700;
+  color: #fff;
+  text-shadow: 0 5px 0 rgba(0, 0, 0, 0.4);
+}
+.fight-count.go {
+  color: #ffd166;
+}
+.fight-count.pop,
+.fight-result.pop {
+  animation: judge-pop 0.5s ease both;
+}
+.fight-result b {
+  font-size: 2.6rem;
+  color: #ff6b6b;
+  text-shadow: 0 4px 0 rgba(0, 0, 0, 0.4);
+}
+.fight-result span {
+  font-size: 1.3rem;
+  font-weight: 700;
+  color: #ffd166;
+}
+.fight-result.lose span {
+  color: #ffa8a8;
+}
+.fight-hint {
+  font-size: 0.82rem;
+  color: rgba(255, 255, 255, 0.75);
+  text-align: center;
+}
+.fight-pad {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.pad-arrows {
+  display: flex;
+  gap: 8px;
+}
+.pad-btn {
+  display: grid;
+  place-items: center;
+  width: 54px;
+  height: 54px;
+  border: 0;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.16);
+  color: #fff;
+  font-size: 1.6rem;
+  font-weight: 700;
+  cursor: pointer;
+  touch-action: manipulation;
+  box-shadow: 0 4px 0 rgba(0, 0, 0, 0.3);
+}
+.pad-btn:active {
+  transform: translateY(3px);
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.3);
+}
+.pad-hit {
+  width: 84px;
+  font-size: 1.1rem;
+  background: linear-gradient(180deg, var(--primary-a), var(--primary-b));
+}
+@media (max-width: 760px) {
+  .fight {
+    align-items: flex-end;
+    padding: 10px 10px 90px;
+  }
+  .fight-card {
+    padding: 12px;
+    gap: 8px;
+  }
+  .fighter {
+    min-width: 120px;
+    padding: 6px 8px;
+  }
+  .fighter-emoji {
+    font-size: 1.5rem;
+  }
+  .fight-arrows .arrow {
+    width: 36px;
+    height: 36px;
+    font-size: 1.2rem;
+    border-radius: 10px;
+  }
+  .fight-arrows {
+    gap: 5px;
+    min-height: 40px;
+  }
+  .pad-btn {
+    width: 48px;
+    height: 48px;
+  }
+  .pad-hit {
+    width: 70px;
+  }
+}
+@media (max-height: 520px) and (orientation: landscape) {
+  .fight {
+    padding: 6px;
+  }
+  .fight-card {
+    padding: 8px 12px;
+    gap: 6px;
+  }
+  .fight-title {
+    font-size: 1.1rem;
+  }
+  .fight-stage {
+    gap: 6px;
+    padding: 0;
+  }
+}
+
+/* duel live: progres panah tiap petarung (dilihat pemain lain & penonton di room) */
+.fight-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: 6px;
+  padding: 3px 10px;
+  border-radius: 99px;
+  background: rgba(255, 59, 92, 0.9);
+  color: #fff;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-shadow: none;
+}
+.fighter-lane {
+  display: flex;
+  gap: 3px;
+  min-height: 18px;
+  margin-top: 2px;
+  border-radius: 6px;
+  transition: background 0.15s;
+}
+.lane-arrow {
+  display: grid;
+  place-items: center;
+  width: 17px;
+  height: 17px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.12);
+  font-size: 0.7rem;
+  color: rgba(255, 255, 255, 0.55);
+}
+.lane-arrow.ok {
+  background: #4dabf7;
+  color: #fff;
+}
+.fighter-lane.ready .lane-arrow {
+  background: #ffb703;
+  color: #fff;
+}
+.fighter-lane.hit .lane-arrow {
+  background: currentColor;
+}
+.fighter-lane.hit .lane-arrow .ico {
+  color: var(--ink);
+}
+.fighter-lane.wrong {
+  animation: shake 0.3s ease;
+}
+.fighter-lane.wrong .lane-arrow {
+  background: rgba(255, 77, 109, 0.6);
+}
+.lane-arrow.dir-down .ico {
+  transform: rotate(180deg);
+}
+.lane-arrow.dir-left .ico {
+  transform: rotate(-90deg);
+}
+.lane-arrow.dir-right .ico {
+  transform: rotate(90deg);
+}
+/* petarung sudah punya baris panah besar sendiri */
+.fight:not(.watching) .fighter.me .fighter-lane {
+  display: none;
+}
+/* penonton: kartu duel tetap jelas (tidak diperkecil) karena progres live ada di kartu */
+.fight.watching .fight-card {
+  transform: none;
+  opacity: 1;
+}
+@media (max-width: 760px) {
+  .lane-arrow {
+    width: 14px;
+    height: 14px;
+    font-size: 0.6rem;
+  }
+}
