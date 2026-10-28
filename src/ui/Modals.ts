@@ -94,12 +94,14 @@ export class HowToPlay extends Modal {
 
 export class PauseMenu extends Modal {
   /** online: judul 'Menu' (permainan tidak dibekukan) dan tombol keluar room */
-  setOnline(v: boolean): void {
+  setOnline(v: boolean, spectator = false): void {
     this.online = v;
+    this.spectator = v && spectator;
     this.render();
   }
 
   private online = false;
+  private spectator = false;
 
   constructor(private cb: { onResume(): void; onSettings(): void; onQuit(): void }) {
     super();
@@ -115,7 +117,7 @@ export class PauseMenu extends Modal {
         h('h2', null, icon('pause'), t(this.online ? 'pause.menu' : 'pause.title')),
         h('button', { class: 'btn primary big', onclick: () => this.cb.onResume() }, icon('play'), t('pause.resume')),
         h('button', { class: 'btn big', onclick: () => this.cb.onSettings() }, icon('settings'), t('pause.settings')),
-        h('button', { class: 'btn danger big', onclick: () => this.cb.onQuit() }, icon('exit'), t(this.online ? 'pause.leave' : 'pause.quit')),
+        h('button', { class: 'btn danger big', onclick: () => this.cb.onQuit() }, icon('exit'), t(this.spectator ? 'live.stop' : this.online ? 'pause.leave' : 'pause.quit')),
       ),
     );
   }

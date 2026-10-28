@@ -344,3 +344,169 @@ describe('sambung ulang', () => {
     back.close();
   }, 30000);
 });
+
+async function startGame(n: number): Promise<TestClient[]> {
+  const clients = await makeRoom(n);
+  for (const c of clients.slice(1)) c.send({ t: 'ready', ready: true });
+  await new Promise((r) => setTimeout(r, 50));
+  clients[0].send({ t: 'start_game' });
+  await clients[0].wait('game_start');
+  return clients;
+}
+
+describe('ekspresi', () => {
+  it('ekspresi pemain sampai ke pemain lain dan pengirimnya', async () => {
+    const [host, b] = await makeRoom(2);
+    host.send({ t: 'emote', id: 'clap' });
+    const atB = await b.wait('emote');
+    expect(atB).toMatchObject({ playerId: host.me, id: 'clap', spectator: false, name: 'Host' });
+    expect((await host.wait('emote')).id).toBe('clap');
+    host.close();
+    b.close();
+  });
+
+  it('ekspresi tak dikenal diabaikan dan spam dibatasi', async () => {
+    const [host, b] = await makeRoom(2);
+    host.send({ t: 'emote', id: 'bukan-ekspresi' });
+    host.send({ t: 'emote', id: 'laugh' });
+    host.send({ t: 'emote', id: 'wow' }); // terlalu cepat setelah yang sebelumnya
+    await new Promise((r) => setTimeout(r, 80));
+    expect(b.msgs.filter((m) => m.t === 'emote').map((m) => (m as Extract<ServerMsg, { t: 'emote' }>).id)).toEqual(['laugh']);
+    host.close();
+    b.close();
+  });
+});
+
+describe('live: penonton & chat', () => {
+  it('nama wajib diisi untuk menonton', async () => {
+    const [host] = await makeRoom(1);
+    const v = await open();
+    v.send({ t: 'spectate', code: host.room!.code, name: '   ' });
+    expect((await v.wait('error')).message).toMatch(/nama/i);
+    host.close();
+    v.close();
+  });
+
+  it('penonton masuk saat bermain: dapat snapshot, jumlah penonton tampil, tidak boleh melempar', async () => {
+    const [host, b] = await startGame(2);
+    const v = await open();
+    v.send({ t: 'spectate', code: host.room!.code, name: 'Budi' });
+    const joined = await v.wait('joined');
+    expect(joined.role).toBe('spectator');
+    expect(joined.name).toBe('Budi');
+    const snap = await v.wait('game_snapshot');
+    expect(snap.state.players).toHaveLength(2);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(host.room!.viewers).toEqual(['Budi']);
+    // penonton tetap menerima hasil lemparan
+    await v.wait('turn_result', 3000);
+    const from = v.msgs.length;
+    v.send({ t: 'roll' });
+    expect((await v.wait('error', 2000, from)).message).toMatch(/Penonton/);
+    v.send({ t: 'back_to_lobby' });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(host.room!.phase).toBe('playing');
+    // penonton keluar → hitungan turun
+    v.send({ t: 'leave' });
+    await new Promise((r) => setTimeout(r, 60));
+    expect(host.room!.viewers).toEqual([]);
+    [host, b, v].forEach((c) => c.close());
+  });
+
+  it('nama penonton yang sama dengan pemain dibedakan', async () => {
+    const [host] = await makeRoom(1);
+    const v = await open();
+    v.send({ t: 'spectate', code: host.room!.code, name: 'host' });
+    expect((await v.wait('joined')).name).toBe('host 2');
+    host.close();
+    v.close();
+  });
+
+  it('chat pemain & penonton sampai ke semua anggota; riwayat dikirim ke yang baru masuk', async () => {
+    const [host, b] = await makeRoom(2);
+    const v = await open();
+    v.send({ t: 'spectate', code: host.room!.code, name: 'Budi' });
+    await v.wait('joined');
+    host.send({ t: 'chat', text: '  halo   semua  ' });
+    const atV = await v.wait('chat');
+    // pesan pertama yang diterima penonton adalah sambutan sistem miliknya sendiri
+    expect(atV.msg.role).toBe('system');
+    await new Promise((r) => setTimeout(r, 60));
+    const texts = (c: TestClient) => c.msgs.filter((m) => m.t === 'chat').map((m) => (m as Extract<ServerMsg, { t: 'chat' }>).msg);
+    const hello = texts(v).find((m) => m.text === 'halo semua');
+    expect(hello).toMatchObject({ role: 'player', name: 'Host', from: host.me });
+
+    v.send({ t: 'chat', text: 'semangat!' });
+    await new Promise((r) => setTimeout(r, 60));
+    expect(texts(b).find((m) => m.text === 'semangat!')).toMatchObject({ role: 'spectator', name: 'Budi' });
+
+    // penonton kedua mendapat riwayat
+    const w = await open();
+    w.send({ t: 'spectate', code: host.room!.code, name: 'Wati' });
+    const hist = await w.wait('chat_history');
+    expect(hist.msgs.map((m) => m.text)).toEqual(expect.arrayContaining(['halo semua', 'semangat!']));
+    // ekspresi penonton ditandai spectator
+    w.send({ t: 'emote', id: 'cheer' });
+    expect(await host.wait('emote')).toMatchObject({ spectator: true, name: 'Wati', id: 'cheer' });
+    [host, b, v, w].forEach((c) => c.close());
+  });
+
+  it('chat kosong diabaikan, terlalu cepat ditolak dengan kode chat_rate', async () => {
+    const [host, b] = await makeRoom(2);
+    host.send({ t: 'chat', text: '    ' });
+    host.send({ t: 'chat', text: 'satu' });
+    host.send({ t: 'chat', text: 'dua' });
+    const err = await host.wait('error');
+    expect(err.code).toBe('chat_rate');
+    await new Promise((r) => setTimeout(r, 50));
+    expect(b.msgs.filter((m) => m.t === 'chat')).toHaveLength(1);
+    host.close();
+    b.close();
+  });
+
+  it('daftar live hanya berisi room yang sedang bermain', async () => {
+    const [lobbyHost] = await makeRoom(1);
+    const [host, b] = await startGame(2);
+    const v = await open();
+    v.send({ t: 'list_live' });
+    const list = await v.wait('live_list');
+    const codes = list.rooms.map((r) => r.code);
+    expect(codes).toContain(host.room!.code);
+    expect(codes).not.toContain(lobbyHost.room!.code);
+    expect(list.rooms.find((r) => r.code === host.room!.code)!.players).toHaveLength(2);
+    [lobbyHost, host, b, v].forEach((c) => c.close());
+  });
+
+  it('penonton terputus bisa kembali dengan token', async () => {
+    const [host, b] = await startGame(2);
+    const v = await open();
+    v.send({ t: 'spectate', code: host.room!.code, name: 'Budi' });
+    const joined = await v.wait('joined');
+    v.close();
+    await new Promise((r) => setTimeout(r, 60));
+    expect(host.room!.viewers).toEqual([]);
+    const back = await open();
+    back.send({ t: 'rejoin', code: host.room!.code, token: joined.token });
+    const again = await back.wait('joined');
+    expect(again).toMatchObject({ role: 'spectator', you: joined.you, name: 'Budi' });
+    await back.wait('game_snapshot');
+    await back.wait('chat_history');
+    expect(host.room!.viewers).toEqual(['Budi']);
+    [host, b, back].forEach((c) => c.close());
+  });
+
+  it('semua pemain keluar: penonton diberi tahu room bubar', async () => {
+    const [host, b] = await makeRoom(2);
+    const v = await open();
+    v.send({ t: 'spectate', code: host.room!.code, name: 'Budi' });
+    await v.wait('joined');
+    host.send({ t: 'leave' });
+    b.send({ t: 'leave' });
+    expect((await v.wait('error')).code).toBe('room_closed');
+    // room benar-benar hilang dari server
+    const late = await open();
+    late.send({ t: 'spectate', code: host.room!.code, name: 'Telat' });
+    expect((await late.wait('error')).message).toMatch(/tidak ditemukan/);
+    [host, b, v, late].forEach((c) => c.close());
+  });
+});

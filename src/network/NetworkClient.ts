@@ -1,5 +1,5 @@
 import { io, type Socket } from 'socket.io-client';
-import type { ClientMsg, RoomInfo, ServerMsg } from './protocol';
+import type { ChatMsg, ClientMsg, Role, RoomInfo, ServerMsg } from './protocol';
 
 export type NetStatus = 'idle' | 'connecting' | 'connected' | 'disconnected';
 
@@ -22,6 +22,11 @@ export class NetworkClient {
   status: NetStatus = 'idle';
   room: RoomInfo | null = null;
   myId = '';
+  myName = '';
+  /** peran di room saat ini: pemain atau penonton */
+  role: Role | null = null;
+  /** pesan chat room saat ini (riwayat dari server + pesan baru) */
+  chat: ChatMsg[] = [];
   /** nomor percobaan sambung ulang saat ini (0 = tersambung) */
   attempts = 0;
 
@@ -63,6 +68,10 @@ export class NetworkClient {
 
   get isHost(): boolean {
     return !!this.room && this.room.hostId === this.myId;
+  }
+
+  get isSpectator(): boolean {
+    return !!this.room && this.role === 'spectator';
   }
 
   onStatus(fn: (s: NetStatus) => void): () => void {
@@ -117,24 +126,29 @@ export class NetworkClient {
       case 'joined':
         this.room = msg.room;
         this.myId = msg.you;
+        this.myName = msg.name;
+        this.role = msg.role;
+        this.chat = [];
         this.saveSession({ code: msg.room.code, token: msg.token, at: Date.now() });
         break;
       case 'room_state':
         this.room = msg.room;
         break;
+      case 'chat_history':
+        this.chat = msg.msgs.slice();
+        break;
+      case 'chat':
+        this.chat.push(msg.msg);
+        if (this.chat.length > 100) this.chat.shift();
+        break;
       case 'turn':
         if (this.session) this.saveSession({ ...this.session, at: Date.now() }); // sesi tetap segar selama bermain
         break;
       case 'left':
-        this.room = null;
-        this.myId = '';
-        this.saveSession(null);
+        this.clearRoom();
         break;
       case 'error':
-        if (msg.code === 'rejoin_failed') {
-          this.room = null;
-          this.saveSession(null);
-        }
+        if (msg.code === 'rejoin_failed' || msg.code === 'room_closed') this.clearRoom();
         break;
       default:
         break;
@@ -159,8 +173,14 @@ export class NetworkClient {
   /** Keluar dari room (sesi dihapus). Koneksi tetap terbuka untuk membuat/gabung room lain. */
   leave(): void {
     if (this.room) this.send({ t: 'leave' });
+    this.clearRoom();
+  }
+
+  private clearRoom(): void {
     this.room = null;
     this.myId = '';
+    this.role = null;
+    this.chat = [];
     this.saveSession(null);
   }
 }

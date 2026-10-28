@@ -7,6 +7,7 @@ import { NetworkClient } from './network/NetworkClient';
 import { SceneManager } from './scene/SceneManager';
 import { Stage } from './scene/Stage';
 import { CharacterSelect } from './ui/CharacterSelect';
+import { ChatPanel } from './ui/ChatPanel';
 import { HUD } from './ui/HUD';
 import { ConnectionOverlay } from './ui/ConnectionOverlay';
 import { Lobby } from './ui/Lobby';
@@ -82,6 +83,10 @@ async function boot(): Promise<void> {
       menu.hide();
       lobby.show();
     },
+    onWatch: () => {
+      menu.hide();
+      lobby.show(undefined, true);
+    },
     onSettings: () => settingsPanel.show(),
     onHowTo: () => howTo.show(),
   });
@@ -91,7 +96,11 @@ async function boot(): Promise<void> {
       lobby.hide();
       goMenu();
     },
+    onVisibility: () => chat.refresh(),
   });
+
+  // live chat kiri bawah: tampil selama berada di room (lobby room / permainan online)
+  const chat: ChatPanel = new ChatPanel(net, bus, () => (game.online ? 'game' : lobby.isVisible ? 'lobby' : null));
 
   const setup: CharacterSelect = new CharacterSelect({
     onStart: (config) => {
@@ -126,8 +135,8 @@ async function boot(): Promise<void> {
     onAgain: () => {
       victory.hide();
       if (game.online) {
-        // online: kembali ke lobby room yang sama untuk main lagi
-        net.send({ t: 'back_to_lobby' });
+        // online: kembali ke lobby room yang sama untuk main lagi (penonton ikut menunggu di lobby)
+        if (!net.isSpectator) net.send({ t: 'back_to_lobby' });
         game.exit();
         lobby.show();
       } else {
@@ -152,7 +161,8 @@ async function boot(): Promise<void> {
     },
   });
 
-  uiRoot.append(menu.el, setup.el, lobby.el, hud.el, victory.el, pause.el, howTo.el, settingsPanel.el, netOverlay.el);
+  // chat sebelum modal: aturan CSS .modal:nth-last-child menumpuk modal terakhir paling atas
+  uiRoot.append(menu.el, setup.el, lobby.el, hud.el, victory.el, chat.el, pause.el, howTo.el, settingsPanel.el, netOverlay.el);
 
   // suara tombol (delegasi)
   uiRoot.addEventListener('click', (e) => {
@@ -190,14 +200,14 @@ async function boot(): Promise<void> {
     autoRejoin = false;
     lobby.hide();
     menu.hide();
-    pause.setOnline(true);
+    pause.setOnline(true, net.isSpectator);
     game.startOnline(net, state, false);
   });
   net.on('game_snapshot', ({ state }) => {
     autoRejoin = false;
     lobby.hide();
     menu.hide();
-    pause.setOnline(true);
+    pause.setOnline(true, net.isSpectator);
     game.startOnline(net, state, true);
   });
   net.on('joined', () => {
@@ -212,6 +222,12 @@ async function boot(): Promise<void> {
       lobby.hide();
       goMenu();
       toast(t('net.expired'), 'bad');
+    } else if (code === 'room_closed') {
+      // penonton: semua pemain keluar dan room bubar → kembali ke daftar live
+      pause.hide();
+      victory.hide();
+      if (game.online) game.exit();
+      lobby.show();
     }
   });
   net.on('room_state', ({ room }) => {
@@ -240,11 +256,13 @@ async function boot(): Promise<void> {
 
   audio.playMusic('menu');
   stage.camera.attract(true);
-  const inviteCode = new URLSearchParams(location.search).get('room');
-  if (inviteCode) {
-    // tautan undangan ?room=KODE: langsung ke lobby dengan kode terisi
+  const params = new URLSearchParams(location.search);
+  const inviteCode = params.get('room');
+  const watchCode = params.get('watch');
+  if (inviteCode || watchCode) {
+    // tautan undangan ?room=KODE / tautan tonton ?watch=KODE: langsung ke lobby dengan kode terisi
     history.replaceState(null, '', location.pathname);
-    lobby.show(inviteCode);
+    lobby.show(inviteCode ?? watchCode ?? undefined, !inviteCode);
   } else if (autoRejoin) {
     // mencoba masuk kembali ke room terakhir (mis. setelah tab tertutup / refresh)
     lobby.setRestoring(true);

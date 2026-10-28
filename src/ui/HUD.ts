@@ -1,7 +1,7 @@
 import { CHARACTERS, CHARGE_FILL_SECONDS, CHARGE_OVERHEAT_GRACE, CHARGE_PERFECT_FROM, TILE_COUNT } from '../config';
 import type { Game } from '../core/Game';
 import { onLangChange, t } from '../i18n';
-import { EMOTES } from '../network/protocol';
+import { EXPRESSIONS, expressionEmoji, type ExpressionId } from '../network/protocol';
 import { settings } from '../utils/settings';
 import { h, setVisible } from './dom';
 import { icon } from './icons';
@@ -10,7 +10,12 @@ interface Card {
   el: HTMLElement;
   info: HTMLElement;
   bar: HTMLElement;
+  bubble: HTMLElement;
+  bubbleTimer: number;
 }
+
+/** jeda minimal antar ekspresi dari perangkat ini (server juga membatasi) */
+const EXPRESSION_COOLDOWN_MS = 1200;
 
 const hex = (n: number) => '#' + n.toString(16).padStart(6, '0');
 
@@ -24,7 +29,10 @@ export class HUD {
   private rollBtn = h('button', { class: 'roll-btn' });
   private hint = h('div', { class: 'roll-hint' });
   private timer = h('div', { class: 'turn-timer hidden' });
-  private emoteBar = h('div', { class: 'emote-bar hidden' });
+  private exprPop = h('div', { class: 'expr-pop hidden', role: 'menu' });
+  private exprToggle = h('button', { class: 'icon-btn expr-toggle', 'aria-haspopup': 'menu', onclick: () => this.toggleExpressions() }, icon('smile'));
+  private exprDock = h('div', { class: 'expr-dock' }, this.exprPop, this.exprToggle);
+  private livePill = h('div', { class: 'live-pill hidden' });
   private chargeFill = h('i');
   private charge = h(
     'div',
@@ -46,7 +54,7 @@ export class HUD {
   /** pemain yang gilirannya sedang berjalan (state.current sudah maju lebih dulu saat animasi) */
   private activeId = '';
   private deadline: { playerId: string; at: number } | null = null;
-  private emoteLocked = false;
+  private exprLockedUntil = 0;
 
   constructor(
     private game: Game,
@@ -57,12 +65,17 @@ export class HUD {
     this.el.append(
       this.players,
       controls,
+      this.livePill,
       this.banner,
       this.dicePop,
       this.log,
-      this.emoteBar,
+      this.exprDock,
       h('div', { class: 'hud-bottom' }, this.timer, this.charge, this.rollBtn, this.hint),
     );
+    // klik di luar panel ekspresi menutupnya
+    document.addEventListener('pointerdown', (e) => {
+      if (!this.exprDock.contains(e.target as Node)) this.toggleExpressions(false);
+    });
     // tahan untuk mengisi tenaga, lepas untuk melempar
     this.rollBtn.addEventListener('pointerdown', (e) => {
       e.preventDefault();
@@ -95,6 +108,10 @@ export class HUD {
     });
     bus.on('net:room', ({ room }) => {
       for (const p of room.players) this.cards.get(p.id)?.el.classList.toggle('offline', !p.connected);
+      this.renderLive(room.viewers.length);
+    });
+    bus.on('expression', ({ playerId, spectator, id }) => {
+      if (!spectator) this.cardBubble(playerId, id);
     });
     bus.on('phase', () => {
       this.updateRoll();
@@ -110,16 +127,18 @@ export class HUD {
     window.setInterval(() => this.tickTimer(), 400);
 
     window.addEventListener('keydown', (e) => {
-      if (!this.visible) return;
+      if (!this.visible || isTyping(e)) return;
       if (e.code === 'Space' || e.code === 'Enter') {
         e.preventDefault();
         if (!e.repeat) this.beginCharge();
       } else if (e.code === 'Escape' || e.code === 'KeyP') {
         this.cb.onPause();
+      } else if (/^Digit[1-8]$/.test(e.code) && !e.repeat && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        this.sendExpression(EXPRESSIONS[Number(e.code.slice(5)) - 1].id);
       }
     });
     window.addEventListener('keyup', (e) => {
-      if (this.visible && (e.code === 'Space' || e.code === 'Enter')) this.endCharge(false);
+      if (this.visible && !isTyping(e) && (e.code === 'Space' || e.code === 'Enter')) this.endCharge(false);
     });
     window.addEventListener('blur', () => this.cancelCharge());
   }
@@ -187,6 +206,9 @@ export class HUD {
     this.soundBtn.title = t('hud.sound');
     this.cameraBtn.title = t('hud.camera');
     this.pauseBtn.title = t('hud.pause');
+    this.exprToggle.title = t('expr.title');
+    this.exprToggle.setAttribute('aria-label', t('expr.title'));
+    this.buildExpressions();
     this.updateRoll();
     if (this.visible) this.refresh();
   }
@@ -200,20 +222,27 @@ export class HUD {
     const online = !!this.game.online;
     // tombol percepat hanya berguna melawan komputer
     this.speedBtn.classList.toggle('hidden', online);
-    this.buildEmoteBar(online);
+    // online: log kejadian pindah ke umpan chat (kiri bawah)
+    this.el.classList.toggle('online', online);
+    this.el.classList.toggle('spectating', !!this.game.online?.isSpectator);
+    this.toggleExpressions(false);
+    setVisible(this.livePill, online);
+    this.renderLive(this.game.online?.room?.viewers.length ?? 0);
     for (const p of this.game.state.players) {
       const emoji = CHARACTERS.find((c) => c.id === p.character)?.emoji ?? '🎲';
       const info = h('small');
       const bar = h('i', { style: { background: hex(p.color) } });
       const tag = p.isBot ? t('hud.bot') : online && this.game.isMine(p.id) ? t('hud.you') : null;
+      const bubble = h('span', { class: 'pcard-bubble', 'aria-hidden': 'true' });
       const el = h(
         'div',
         { class: 'pcard', style: { '--c': hex(p.color) } },
         h('span', { class: 'pemoji' }, emoji),
         h('div', { class: 'pinfo' }, h('b', null, h('span', { class: 'pname' }, p.name), tag ? h('em', null, tag) : null), info, h('div', { class: 'bar' }, bar)),
+        bubble,
       );
       this.players.append(el);
-      this.cards.set(p.id, { el, info, bar });
+      this.cards.set(p.id, { el, info, bar, bubble, bubbleTimer: 0 });
     }
     if (online && this.game.online?.room) {
       for (const p of this.game.online.room.players) this.cards.get(p.id)?.el.classList.toggle('offline', !p.connected);
@@ -224,32 +253,58 @@ export class HUD {
     this.updateRoll();
   }
 
-  private buildEmoteBar(online: boolean): void {
-    setVisible(this.emoteBar, online);
-    this.emoteBar.replaceChildren();
-    if (!online) return;
-    for (const e of EMOTES) {
-      this.emoteBar.append(
+  // ───────────────────────── Ekspresi ─────────────────────────
+
+  private buildExpressions(): void {
+    this.exprPop.replaceChildren(
+      ...EXPRESSIONS.map((e, i) =>
         h(
           'button',
-          {
-            class: 'emote-btn',
-            title: t('emote.title'),
-            onclick: () => {
-              if (this.emoteLocked) return;
-              this.emoteLocked = true;
-              this.emoteBar.classList.add('locked');
-              this.game.online?.send({ t: 'emote', id: e });
-              window.setTimeout(() => {
-                this.emoteLocked = false;
-                this.emoteBar.classList.remove('locked');
-              }, 1500);
-            },
-          },
-          e,
+          { class: 'expr-btn', role: 'menuitem', title: `${t(`expr.${e.id}`)} (${i + 1})`, onclick: () => this.sendExpression(e.id) },
+          h('span', { class: 'expr-emoji' }, e.emoji),
+          h('span', { class: 'expr-label' }, t(`expr.${e.id}`)),
+          h('kbd', null, String(i + 1)),
         ),
-      );
-    }
+      ),
+    );
+  }
+
+  private toggleExpressions(force?: boolean): void {
+    const show = force ?? this.exprPop.classList.contains('hidden');
+    setVisible(this.exprPop, show);
+    this.exprToggle.classList.toggle('active', show);
+    this.exprToggle.setAttribute('aria-expanded', String(show));
+  }
+
+  private sendExpression(id: ExpressionId): void {
+    const now = Date.now();
+    if (now < this.exprLockedUntil) return;
+    this.exprLockedUntil = now + EXPRESSION_COOLDOWN_MS;
+    this.exprDock.classList.add('locked');
+    window.setTimeout(() => this.exprDock.classList.remove('locked'), EXPRESSION_COOLDOWN_MS);
+    this.game.expression(id);
+  }
+
+  /** Ekspresi pemain juga tampil di kartunya — selalu terlihat walau pionnya di luar layar kamera. */
+  private cardBubble(playerId: string, id: ExpressionId): void {
+    const card = this.cards.get(playerId);
+    if (!card) return;
+    card.bubble.textContent = expressionEmoji(id);
+    card.bubble.classList.remove('show');
+    void card.bubble.offsetWidth; // restart animasi CSS
+    card.bubble.classList.add('show');
+    window.clearTimeout(card.bubbleTimer);
+    card.bubbleTimer = window.setTimeout(() => card.bubble.classList.remove('show'), 2000);
+  }
+
+  private renderLive(viewers: number): void {
+    const watching = !!this.game.online?.isSpectator;
+    this.livePill.replaceChildren(
+      h('i', { class: 'live-dot' }),
+      'LIVE',
+      h('span', { class: 'live-count', title: t('live.viewers', { n: viewers }) }, icon('eye'), String(viewers)),
+      ...(watching ? [h('em', null, t('live.watching'))] : []),
+    );
   }
 
   private hide(): void {
@@ -284,7 +339,7 @@ export class HUD {
     const label = ready ? t('hud.roll') : phase === 'ROLLING' ? t('hud.rolling') : mine ? t('hud.roll') : t('hud.botTurn', { name: player.name });
     this.rollBtn.replaceChildren(...(mine ? [icon('dice')] : []), h('span', null, label));
     if (ready && this.chargeStart === null) this.hint.textContent = t('hud.holdShort');
-    else if (!ready && this.chargeStart === null) this.hint.textContent = '';
+    else if (!ready && this.chargeStart === null) this.hint.textContent = g.online?.isSpectator ? t('live.watchingHint') : '';
     this.charge.classList.toggle('ready', ready);
     if (!ready) this.charge.classList.remove('overheat');
     setVisible(this.rollBtn, phase !== 'GAME_OVER');
@@ -321,9 +376,16 @@ export class HUD {
   }
 
   private addLog(text: string): void {
+    if (this.game.online) return; // online: tampil di umpan chat
     const line = h('div', { class: 'log-line' }, text);
     this.log.append(line);
     while (this.log.childElementCount > 3) this.log.firstElementChild?.remove();
     window.setTimeout(() => line.remove(), 6000);
   }
+}
+
+/** Sedang mengetik di input (mis. chat): pintasan keyboard permainan diabaikan. */
+function isTyping(e: KeyboardEvent): boolean {
+  const el = e.target as HTMLElement | null;
+  return !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable);
 }

@@ -22,6 +22,8 @@ export class VictoryScreen {
       this.timer = window.setTimeout(() => this.show(), 2600);
     });
     game.bus.on('game:exit', () => this.hide());
+    // penonton yang masih di layar ini saat permainan baru dimulai
+    game.bus.on('game:start', () => this.hide());
     onLangChange(() => this.el.classList.contains('hidden') || this.render());
   }
 
@@ -30,12 +32,15 @@ export class VictoryScreen {
     const online = !!this.game.online;
     const winner = players.find((p) => p.id === this.ranking[0])!;
     const youWon = this.game.isMine(winner.id);
+    const watching = !!this.game.online?.isSpectator;
     this.el.replaceChildren(
       h(
         'div',
         { class: 'victory-card' },
         h('h2', null, icon('trophy'), t('victory.title', { name: winner.name })),
-        h('p', { class: youWon ? 'win' : 'lose' }, youWon ? t('victory.youWin') : t('victory.youLose')),
+        watching
+          ? h('p', { class: 'win' }, t('live.winnerMsg', { name: winner.name }))
+          : h('p', { class: youWon ? 'win' : 'lose' }, youWon ? t('victory.youWin') : t('victory.youLose')),
         h(
           'ol',
           { class: 'ranking' },
@@ -49,7 +54,7 @@ export class VictoryScreen {
           'div',
           { class: 'victory-actions' },
           h('button', { class: 'btn primary big', onclick: () => this.cb.onAgain() }, icon(online ? 'users' : 'repeat'), t(online ? 'victory.lobby' : 'victory.again')),
-          h('button', { class: 'btn big', onclick: () => this.cb.onMenu() }, icon(online ? 'exit' : 'home'), t(online ? 'victory.leaveRoom' : 'victory.menu')),
+          h('button', { class: 'btn big', onclick: () => this.cb.onMenu() }, icon(online ? 'exit' : 'home'), t(watching ? 'live.stop' : online ? 'victory.leaveRoom' : 'victory.menu')),
         ),
       ),
     );

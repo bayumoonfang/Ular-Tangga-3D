@@ -1,7 +1,7 @@
 import { CHARACTERS, type BoardPresetId } from '../config';
 import { onLangChange, t } from '../i18n';
 import type { NetworkClient, NetStatus } from '../network/NetworkClient';
-import { MAX_PLAYERS, MIN_PLAYERS, ROOM_CODE_LENGTH, type RoomInfo } from '../network/protocol';
+import { MAX_PLAYERS, MIN_PLAYERS, ROOM_CODE_LENGTH, type LiveRoom, type RoomInfo } from '../network/protocol';
 import { h, setVisible } from './dom';
 import { icon } from './icons';
 
@@ -11,8 +11,10 @@ const CHAR_KEY = 'sl3d.playerChar';
 
 const hex = (n: number) => '#' + n.toString(16).padStart(6, '0');
 const emojiOf = (id: string) => CHARACTERS.find((c) => c.id === id)?.emoji ?? '🎲';
+/** jeda penyegaran daftar "Live sekarang" */
+const LIVE_POLL_MS = 4000;
 
-/** Lobby online: buat / gabung room, daftar pemain (2–4), siap, pengaturan host, mulai. */
+/** Lobby online: buat / gabung / tonton room, daftar pemain (2–4), siap, pengaturan host, mulai. */
 export class Lobby {
   readonly el = h('div', { class: 'screen lobby hidden' });
   private name = '';
@@ -25,10 +27,15 @@ export class Lobby {
   private busy = false;
   /** sedang mencoba masuk kembali ke room terakhir (setelah refresh / tab tertutup) */
   private restoring = false;
+  /** room yang sedang bermain dan bisa ditonton */
+  private live: LiveRoom[] = [];
+  private livePoll = 0;
+  /** nama kosong saat mencoba menonton: kolom nama disorot */
+  private nameInvalid = false;
 
   constructor(
     private net: NetworkClient,
-    private cb: { onBack(): void },
+    private cb: { onBack(): void; onVisibility(visible: boolean): void },
   ) {
     try {
       this.name = localStorage.getItem(NAME_KEY) ?? '';
@@ -38,22 +45,45 @@ export class Lobby {
       /* abaikan */
     }
     onLangChange(() => this.render());
-    net.onStatus(() => this.render());
+    net.onStatus(() => {
+      this.render();
+      this.requestLive();
+    });
     net.on('joined', () => {
       this.busy = false;
       this.restoring = false;
       this.render();
     });
     net.on('room_state', () => this.render());
-    net.on('left', () => this.render());
+    net.on('left', () => {
+      this.render();
+      this.requestLive();
+    });
+    net.on('live_list', ({ rooms }) => {
+      this.live = rooms;
+      if (!this.net.room) this.render();
+    });
     net.on('error', ({ message, code }) => {
       this.busy = false;
-      if (code !== 'rejoin_failed') this.showError(message);
+      if (code === 'chat_rate') return; // ditampilkan di panel chat
+      if (code === 'room_closed') {
+        this.showError(t('live.closed'));
+        this.requestLive();
+      } else if (code !== 'rejoin_failed') this.showError(message);
       else {
         this.restoring = false;
         this.render();
       }
     });
+  }
+
+  get isVisible(): boolean {
+    return this.visible;
+  }
+
+  /** Minta daftar room live (hanya di layar buat/gabung, saat tersambung). */
+  private requestLive(): void {
+    if (this.visible && !this.net.room && this.net.status === 'connected') this.net.send({ t: 'list_live' });
   }
 
   /** Tampilkan layar "menyambungkan kembali" alih-alih form buat/gabung room. */
@@ -62,17 +92,28 @@ export class Lobby {
     this.render();
   }
 
-  show(prefillCode?: string): void {
+  /** @param watch tautan tonton (?watch=KODE) / menu Tonton Live: kolom nama disorot bila masih kosong */
+  show(prefillCode?: string, watch = false): void {
     this.visible = true;
     if (prefillCode) this.codeInput = prefillCode.toUpperCase().slice(0, ROOM_CODE_LENGTH);
     this.net.connect();
     this.render();
     setVisible(this.el, true);
+    window.clearInterval(this.livePoll);
+    this.livePoll = window.setInterval(() => this.requestLive(), LIVE_POLL_MS);
+    this.requestLive();
+    if (watch && !this.net.room) {
+      if (!this.name.trim()) this.el.querySelector<HTMLInputElement>('[data-focus="name"]')?.focus();
+      this.el.querySelector('.live-section')?.scrollIntoView({ block: 'nearest' });
+    }
+    this.cb.onVisibility(true);
   }
 
   hide(): void {
     this.visible = false;
+    window.clearInterval(this.livePoll);
     setVisible(this.el, false);
+    this.cb.onVisibility(false);
   }
 
   /** Pesan singkat di lobby (mis. room bubar). */
@@ -187,17 +228,36 @@ export class Lobby {
 
   // ───────────────────────── Sebelum masuk room ─────────────────────────
 
+  /** Masuk sebagai penonton: nama wajib diisi lebih dulu. */
+  private spectate(code: string): void {
+    if (!this.name.trim()) {
+      this.nameInvalid = true;
+      this.showError(t('live.nameRequired'));
+      this.el.querySelector<HTMLInputElement>('[data-focus="name"]')?.focus();
+      return;
+    }
+    this.saveProfile();
+    this.busy = true;
+    this.net.send({ t: 'spectate', code, name: this.name.trim() });
+  }
+
   private entryView(): HTMLElement {
     const online = this.net.status === 'connected';
     const nameInput = h('input', {
       type: 'text',
-      class: 'text-input',
+      class: `text-input ${this.nameInvalid ? 'invalid' : ''}`,
       maxlength: 14,
       placeholder: t('setup.namePlaceholder'),
       value: this.name,
       'data-focus': 'name',
+      'aria-invalid': this.nameInvalid ? 'true' : undefined,
       oninput: () => {
         this.name = nameInput.value;
+        if (this.nameInvalid && this.name.trim()) {
+          this.nameInvalid = false;
+          nameInput.classList.remove('invalid');
+          nameInput.removeAttribute('aria-invalid');
+        }
       },
     });
     const codeInput = h('input', {
@@ -213,7 +273,7 @@ export class Lobby {
       oninput: () => {
         this.codeInput = codeInput.value.toUpperCase().replace(/[^A-Z0-9]/g, '');
         codeInput.value = this.codeInput;
-        joinBtn.disabled = !online || this.busy || this.codeInput.length < ROOM_CODE_LENGTH;
+        joinBtn.disabled = watchBtn.disabled = !online || this.busy || this.codeInput.length < ROOM_CODE_LENGTH;
       },
       onkeydown: (e: Event) => {
         if ((e as KeyboardEvent).key === 'Enter' && !joinBtn.disabled) joinBtn.click();
@@ -247,11 +307,21 @@ export class Lobby {
       icon('users'),
       t('lobby.join'),
     );
+    const watchBtn = h(
+      'button',
+      {
+        class: 'btn sm watch-btn',
+        disabled: !online || this.busy || this.codeInput.length < ROOM_CODE_LENGTH,
+        onclick: () => this.spectate(this.codeInput),
+      },
+      icon('eye'),
+      t('live.watchCode'),
+    );
 
     return h(
       'div',
       { class: 'lobby-body' },
-      h('label', { class: 'field' }, h('span', null, t('setup.name')), nameInput),
+      h('label', { class: 'field' }, h('span', null, t('setup.name'), h('small', { class: 'hint' }, ' — ' + t('live.nameHint'))), nameInput),
       h('div', { class: 'field' }, h('span', null, t('setup.character')), this.charPicker(new Set(), (id) => {
         this.character = id;
         this.render();
@@ -265,9 +335,41 @@ export class Lobby {
           { class: 'action-box' },
           h('span', { class: 'action-label' }, t('lobby.codeLabel')),
           h('div', { class: 'join-row' }, codeInput, joinBtn),
+          watchBtn,
         ),
       ),
+      this.liveView(online),
       h('div', { class: 'lobby-foot' }, h('button', { class: 'btn', onclick: () => this.cb.onBack() }, icon('back'), t('setup.back'))),
+    );
+  }
+
+  /** Daftar pertandingan yang sedang berlangsung — klik Tonton untuk masuk sebagai penonton. */
+  private liveView(online: boolean): HTMLElement {
+    const items = this.live.map((r) =>
+      h(
+        'div',
+        { class: 'live-item' },
+        h(
+          'div',
+          { class: 'live-info' },
+          h(
+            'div',
+            { class: 'live-players' },
+            ...r.players.map((p) =>
+              h('span', { class: 'live-player', style: { '--c': hex(p.color) }, title: t('hud.tile', { n: p.position }) }, emojiOf(p.character), h('b', null, p.name), h('small', null, String(p.position))),
+            ),
+          ),
+          h('small', { class: 'hint' }, t('live.meta', { code: r.code, turn: r.turn })),
+        ),
+        h('span', { class: 'live-viewers', title: t('live.viewers', { n: r.viewers }) }, icon('eye'), String(r.viewers)),
+        h('button', { class: 'btn sm accent', disabled: !online || this.busy, onclick: () => this.spectate(r.code) }, icon('eye'), t('live.watch')),
+      ),
+    );
+    return h(
+      'div',
+      { class: 'field live-section' },
+      h('span', { class: 'live-title' }, h('i', { class: 'live-dot' }), t('live.title')),
+      h('div', { class: 'live-list' }, ...(items.length ? items : [h('div', { class: 'live-empty hint' }, t('live.empty'))])),
     );
   }
 
@@ -276,11 +378,13 @@ export class Lobby {
   private roomView(room: RoomInfo): HTMLElement {
     const me = room.players.find((p) => p.id === this.net.myId);
     const isHost = room.hostId === this.net.myId;
+    const watching = this.net.isSpectator;
     const taken = new Set(room.players.filter((p) => p.id !== this.net.myId).map((p) => p.character));
-    const link = `${location.origin}${location.pathname}?room=${room.code}`;
+    const base = `${location.origin}${location.pathname}`;
+    const links = { code: room.code, link: `${base}?room=${room.code}`, watch: `${base}?watch=${room.code}` };
 
-    const copy = (what: 'code' | 'link') => {
-      const text = what === 'code' ? room.code : link;
+    const copy = (what: 'code' | 'link' | 'watch') => {
+      const text = links[what];
       const done = () => {
         this.copied = what;
         this.render();
@@ -341,7 +445,9 @@ export class Lobby {
     const othersReady = room.players.every((p) => p.isHost || p.ready);
     let hint: string;
     let canStart = false;
-    if (isHost) {
+    if (watching) {
+      hint = t('live.lobbyWait');
+    } else if (isHost) {
       if (count < MIN_PLAYERS) hint = t('lobby.hint.min');
       else if (!allConnected) hint = t('lobby.hint.offline');
       else if (!othersReady) hint = t('lobby.hint.notReady');
@@ -353,7 +459,9 @@ export class Lobby {
       hint = me?.ready ? t('lobby.hint.hostWait') : '';
     }
 
-    const primary = isHost
+    const primary = watching
+      ? null
+      : isHost
       ? h('button', { class: 'btn primary big', disabled: !canStart, onclick: () => this.net.send({ t: 'start_game' }) }, icon('play'), t('lobby.start'))
       : h(
           'button',
@@ -362,9 +470,21 @@ export class Lobby {
           me?.ready ? t('lobby.cancelReady') : t('lobby.readyBtn'),
         );
 
+    const copyBtn = (what: 'code' | 'link' | 'watch', ico: 'copy' | 'link' | 'eye', label: string) =>
+      h('button', { class: 'btn sm', onclick: () => copy(what) }, icon(this.copied === what ? 'check' : ico), this.copied === what ? t('lobby.copied') : label);
+
+    const viewers = room.viewers;
+    const viewersView = h(
+      'div',
+      { class: 'field' },
+      h('span', { class: 'live-title' }, icon('eye'), t('live.viewers', { n: viewers.length })),
+      h('div', { class: 'chips-line viewers-line' }, ...(viewers.length ? viewers.map((n) => h('span', { class: 'tag' }, n)) : [h('span', { class: 'hint' }, t('live.noViewers'))])),
+    );
+
     return h(
       'div',
       { class: 'lobby-body' },
+      watching ? h('div', { class: 'watch-banner' }, icon('eye'), h('b', null, t('live.youWatch', { name: this.net.myName }))) : null,
       h(
         'div',
         { class: 'room-code-box' },
@@ -372,22 +492,26 @@ export class Lobby {
         h(
           'div',
           { class: 'room-code-actions' },
-          h('button', { class: 'btn sm', onclick: () => copy('code') }, icon(this.copied === 'code' ? 'check' : 'copy'), this.copied === 'code' ? t('lobby.copied') : t('lobby.copyCode')),
-          h('button', { class: 'btn sm', onclick: () => copy('link') }, icon(this.copied === 'link' ? 'check' : 'link'), this.copied === 'link' ? t('lobby.copied') : t('lobby.copyLink')),
+          copyBtn('code', 'copy', t('lobby.copyCode')),
+          watching ? null : copyBtn('link', 'link', t('lobby.copyLink')),
+          copyBtn('watch', 'eye', t('live.copyWatch')),
         ),
       ),
       h('div', { class: 'field' }, h('span', null, t('lobby.players', { n: count, max: MAX_PLAYERS })), h('div', { class: 'slots' }, ...slots)),
-      h('div', { class: 'field' }, h('span', null, t('lobby.myChar')), this.charPicker(taken, (id) => {
-        this.character = id;
-        this.saveProfile();
-        this.net.send({ t: 'set_character', character: id });
-      })),
+      watching
+        ? null
+        : h('div', { class: 'field' }, h('span', null, t('lobby.myChar')), this.charPicker(taken, (id) => {
+            this.character = id;
+            this.saveProfile();
+            this.net.send({ t: 'set_character', character: id });
+          })),
       h('div', { class: 'field' }, h('span', null, t('lobby.settings')), settingsView),
+      viewersView,
       h('div', { class: 'lobby-hint' }, hint),
       h(
         'div',
         { class: 'lobby-foot' },
-        h('button', { class: 'btn', onclick: () => this.leave() }, icon('exit'), t('lobby.leave')),
+        h('button', { class: 'btn', onclick: () => this.leave() }, icon('exit'), watching ? t('live.stop') : t('lobby.leave')),
         primary,
       ),
     );

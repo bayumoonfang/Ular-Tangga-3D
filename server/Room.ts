@@ -11,12 +11,17 @@ import {
 import { createInitialState, type GameState } from '../src/core/GameState';
 import { DEFAULT_OPTIONS, applyRoll, generateRandomBoard, rollDie, type RuleOptions } from '../src/core/Rules';
 import {
-  EMOTES,
+  CHAT_HISTORY,
+  CHAT_MAX,
   MAX_PLAYERS,
+  MAX_SPECTATORS,
   MIN_PLAYERS,
   NAME_MAX,
   TURN_SECONDS,
   estimateAnimationMs,
+  isExpression,
+  type ChatMsg,
+  type LiveRoom,
   type RoomInfo,
   type RoomPhase,
   type RoomSettings,
@@ -34,6 +39,11 @@ const LOBBY_GRACE_MS = 20_000;
 const EMPTY_ROOM_MS = 60_000;
 /** pemain terputus masih dianggap bisa kembali selama ini; lewat itu giliran mereka dimainkan otomatis (cepat) */
 const RECONNECT_GRACE_MS = 45_000;
+/** batas kirim chat: maks CHAT_BURST pesan per CHAT_WINDOW_MS, dan jeda minimal antar pesan */
+const CHAT_BURST = 5;
+const CHAT_WINDOW_MS = 5_000;
+const CHAT_GAP_MS = 400;
+const EMOTE_GAP_MS = 900;
 
 export interface ServerPlayer {
   id: string;
@@ -47,15 +57,34 @@ export interface ServerPlayer {
   ready: boolean;
 }
 
+/** Penonton: hanya menerima siaran room, boleh chat & ekspresi, tidak ikut bermain. */
+export interface ServerSpectator {
+  id: string;
+  token: string;
+  socketId: string | null;
+  disconnectedAt: number | null;
+  name: string;
+}
+
+type Member = ServerPlayer | ServerSpectator;
+
 type Send = (socketId: string, msg: ServerMsg) => void;
 
-export class RoomError extends Error {}
+export class RoomError extends Error {
+  constructor(
+    message: string,
+    readonly code?: string,
+  ) {
+    super(message);
+  }
+}
 
 /** Satu room: lobby, lalu permainan yang dijalankan server (server authoritative). */
 export class Room {
   phase: RoomPhase = 'lobby';
   hostId = '';
   readonly players: ServerPlayer[] = [];
+  readonly spectators: ServerSpectator[] = [];
   settings: RoomSettings = { boardPreset: 'normal', options: { ...DEFAULT_OPTIONS } };
 
   private state: GameState | null = null;
@@ -69,6 +98,10 @@ export class Room {
   /** lemparan baru boleh diproses setelah animasi giliran sebelumnya kira-kira selesai */
   private canRollAt = 0;
   private turnDeadline = 0;
+  private chatLog: ChatMsg[] = [];
+  private chatSeq = 0;
+  private chatTimes = new Map<string, number[]>();
+  private emoteAt = new Map<string, number>();
 
   constructor(
     readonly code: string,
@@ -93,15 +126,29 @@ export class Room {
         connected: p.socketId !== null,
         isHost: p.id === this.hostId,
       })),
+      viewers: this.spectators.filter((s) => s.socketId !== null).map((s) => s.name),
     };
   }
 
-  private to(p: ServerPlayer, msg: ServerMsg): void {
-    if (p.socketId) this.send(p.socketId, msg);
+  /** Ringkasan untuk daftar "Live sekarang" (hanya room yang sedang bermain). */
+  liveInfo(): LiveRoom | null {
+    if (this.phase !== 'playing' || !this.state) return null;
+    return {
+      code: this.code,
+      players: this.state.players.map((p) => ({ name: p.name, character: p.character, color: p.color, position: p.position })),
+      viewers: this.spectators.filter((s) => s.socketId !== null).length,
+      turn: this.state.turn,
+    };
   }
 
+  private to(m: Member, msg: ServerMsg): void {
+    if (m.socketId) this.send(m.socketId, msg);
+  }
+
+  /** Siaran ke semua pemain dan penonton. */
   broadcast(msg: ServerMsg): void {
     for (const p of this.players) this.to(p, msg);
+    for (const s of this.spectators) this.to(s, msg);
   }
 
   broadcastRoom(): void {
@@ -110,6 +157,10 @@ export class Room {
 
   player(id: string): ServerPlayer | undefined {
     return this.players.find((p) => p.id === id);
+  }
+
+  spectator(id: string): ServerSpectator | undefined {
+    return this.spectators.find((s) => s.id === id);
   }
 
   // ───────────────────────── Anggota ─────────────────────────
@@ -134,13 +185,46 @@ export class Room {
     return p;
   }
 
+  /** Nama unik di antara pemain dan penonton (supaya chat tidak membingungkan). */
   private uniqueName(raw: string): string {
-    const base = raw.replace(/\s+/g, ' ').trim().slice(0, NAME_MAX) || 'Pemain';
+    const base = cleanName(raw) || 'Pemain';
+    const taken = (n: string) => [...this.players, ...this.spectators].some((m) => m.name.toLowerCase() === n.toLowerCase());
     let name = base;
-    for (let i = 2; this.players.some((p) => p.name.toLowerCase() === name.toLowerCase()); i++) {
+    for (let i = 2; taken(name); i++) {
       name = `${base.slice(0, NAME_MAX - 2)} ${i}`;
     }
     return name;
+  }
+
+  /** Masuk sebagai penonton: boleh kapan saja (lobby / bermain / selesai), nama wajib diisi. */
+  addSpectator(socketId: string, rawName: string): ServerSpectator {
+    if (!cleanName(rawName)) throw new RoomError('Isi nama dulu untuk menonton.');
+    if (this.spectators.length >= MAX_SPECTATORS) throw new RoomError(`Penonton penuh (maksimal ${MAX_SPECTATORS}).`);
+    const s: ServerSpectator = {
+      id: 's' + randomBytes(4).toString('hex'),
+      token: randomBytes(16).toString('hex'),
+      socketId,
+      disconnectedAt: null,
+      name: this.uniqueName(rawName),
+    };
+    this.spectators.push(s);
+    return s;
+  }
+
+  /** Dipanggil setelah penonton menerima 'joined' & riwayat chat, agar pesan sambutan tidak terkirim dua kali. */
+  announceSpectator(s: ServerSpectator): void {
+    this.system(`👀 ${s.name} mulai menonton`);
+    this.broadcastRoom();
+  }
+
+  removeSpectator(id: string): void {
+    const idx = this.spectators.findIndex((s) => s.id === id);
+    if (idx < 0) return;
+    this.clearGrace(id);
+    this.spectators.splice(idx, 1);
+    this.chatTimes.delete(id);
+    this.emoteAt.delete(id);
+    this.broadcastRoom();
   }
 
   private freeCharacter(wanted: string): string {
@@ -188,9 +272,10 @@ export class Room {
     if (idx < 0) return;
     this.clearGrace(id);
     this.players.splice(idx, 1);
+    this.chatTimes.delete(id);
+    this.emoteAt.delete(id);
     if (this.players.length === 0) {
-      this.destroy();
-      this.onEmpty();
+      this.close();
       return;
     }
     if (this.hostId === id) {
@@ -222,11 +307,29 @@ export class Room {
     // menutup tab punya waktu kembali; lewat masa tenggang, giliran mereka dimainkan otomatis
     this.broadcastRoom();
     if (this.players.every((o) => o.socketId === null)) {
-      this.emptyTimer = setTimeout(() => {
-        this.destroy();
-        this.onEmpty();
-      }, EMPTY_ROOM_MS);
+      this.emptyTimer = setTimeout(() => this.close(), EMPTY_ROOM_MS);
     }
+  }
+
+  /** Penonton terputus: hitungan penonton turun, slotnya disimpan sebentar agar refresh bisa kembali. */
+  disconnectSpectator(id: string): void {
+    const s = this.spectator(id);
+    if (!s) return;
+    s.socketId = null;
+    s.disconnectedAt = Date.now();
+    this.clearGrace(id);
+    this.graceTimers.set(id, setTimeout(() => this.removeSpectator(id), LOBBY_GRACE_MS));
+    this.broadcastRoom();
+  }
+
+  reconnectSpectator(id: string, socketId: string): ServerSpectator | null {
+    const s = this.spectator(id);
+    if (!s) return null;
+    s.socketId = socketId;
+    s.disconnectedAt = null;
+    this.clearGrace(id);
+    this.broadcastRoom();
+    return s;
   }
 
   reconnect(id: string, socketId: string): ServerPlayer | null {
@@ -240,8 +343,8 @@ export class Room {
     return p;
   }
 
-  /** Kirim state terbaru ke satu pemain yang baru menyambung ulang. */
-  resync(p: ServerPlayer): void {
+  /** Kirim state terbaru ke satu anggota (pemain yang menyambung ulang / penonton yang baru masuk). */
+  resync(p: Member): void {
     if ((this.phase === 'playing' || this.phase === 'finished') && this.state) {
       this.to(p, { t: 'game_snapshot', state: this.state, seq: this.seq });
       if (this.phase === 'playing') {
@@ -389,9 +492,49 @@ export class Room {
     this.rollTimer = null;
   }
 
+  // ───────────────────────── Chat & ekspresi ─────────────────────────
+
+  /** Ekspresi dari pemain atau penonton disiarkan ke semua anggota room (termasuk pengirim). */
   emote(id: string, emoteId: string): void {
-    if (!this.player(id) || !(EMOTES as readonly string[]).includes(emoteId)) return;
-    this.broadcast({ t: 'emote', playerId: id, id: emoteId });
+    const p = this.player(id);
+    const m = p ?? this.spectator(id);
+    if (!m || !isExpression(emoteId)) return;
+    const now = Date.now();
+    if (now - (this.emoteAt.get(id) ?? 0) < EMOTE_GAP_MS) return;
+    this.emoteAt.set(id, now);
+    this.broadcast({ t: 'emote', playerId: id, name: m.name, spectator: !p, id: emoteId });
+  }
+
+  chat(id: string, raw: string): void {
+    const p = this.player(id);
+    const m = p ?? this.spectator(id);
+    if (!m) return;
+    const text = String(raw ?? '').replace(/\s+/g, ' ').trim().slice(0, CHAT_MAX);
+    if (!text) return;
+    const now = Date.now();
+    const recent = (this.chatTimes.get(id) ?? []).filter((t) => now - t < CHAT_WINDOW_MS);
+    if (recent.length >= CHAT_BURST || (recent.length > 0 && now - recent[recent.length - 1] < CHAT_GAP_MS)) {
+      throw new RoomError('Pelan-pelan, tunggu sebentar sebelum mengirim lagi.', 'chat_rate');
+    }
+    recent.push(now);
+    this.chatTimes.set(id, recent);
+    this.post({ from: id, name: m.name, role: p ? 'player' : 'spectator', color: p ? PLAYER_COLORS[p.slot] : undefined, text });
+  }
+
+  /** Riwayat chat untuk anggota yang baru masuk / menyambung ulang. */
+  sendChatHistory(m: Member): void {
+    this.to(m, { t: 'chat_history', msgs: this.chatLog });
+  }
+
+  private system(text: string): void {
+    this.post({ from: '', name: '', role: 'system', text });
+  }
+
+  private post(msg: Omit<ChatMsg, 'id' | 'at'>): void {
+    const full: ChatMsg = { ...msg, id: ++this.chatSeq, at: Date.now() };
+    this.chatLog.push(full);
+    if (this.chatLog.length > CHAT_HISTORY) this.chatLog.shift();
+    this.broadcast({ t: 'chat', msg: full });
   }
 
   /** Setelah permainan selesai: kembali ke lobby untuk main lagi. */
@@ -405,10 +548,21 @@ export class Room {
     }
   }
 
+  /** Room bubar: penonton diberi tahu, lalu room dihapus dari manager. */
+  private close(): void {
+    for (const s of this.spectators) this.to(s, { t: 'error', code: 'room_closed', message: 'Room sudah bubar.' });
+    this.destroy();
+    this.onEmpty();
+  }
+
   destroy(): void {
     this.stopTurn();
     this.cancelEmptyTimer();
     this.graceTimers.forEach((t) => clearTimeout(t));
     this.graceTimers.clear();
   }
+}
+
+function cleanName(raw: string): string {
+  return String(raw ?? '').replace(/\s+/g, ' ').trim().slice(0, NAME_MAX);
 }

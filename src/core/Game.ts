@@ -5,7 +5,7 @@ import { t } from '../i18n';
 import { AIController, type ReactionEvent } from '../players/AIController';
 import { HumanController, type RollInput } from '../players/HumanController';
 import type { NetworkClient } from '../network/NetworkClient';
-import type { ServerMsg } from '../network/protocol';
+import { expressionEmoji, type ExpressionId, type ServerMsg } from '../network/protocol';
 import type { SceneManager } from '../scene/SceneManager';
 import type { Stage } from '../scene/Stage';
 import { createRng, randomSeed, type Rng } from '../utils/random';
@@ -129,7 +129,8 @@ export class Game {
         this.resultWaiter?.();
       }),
       net.on('turn', ({ playerId, deadline }) => this.bus.emit('turn:deadline', { playerId, deadline })),
-      net.on('emote', ({ playerId, id }) => this.stage.characters.get(playerId)?.showEmote(id)),
+      // siaran server sampai ke semua anggota room, termasuk pengirimnya sendiri
+      net.on('emote', ({ playerId, name, spectator, id }) => this.showExpression(playerId, name, spectator, id)),
       net.on('room_state', ({ room }) => this.bus.emit('net:room', { room })),
     ];
     // tombol lempar ditahan: beri tahu server kapan mulai mengisi tenaga (server yang menilai "sempurna")
@@ -345,7 +346,7 @@ export class Game {
     await this.stage.rollDice(value);
     this.check(token);
     this.bus.emit('dice:rolled', { playerId: id, value });
-    this.bus.emit('ui:log', { text: t('log.roll', { name: player.name, value }) });
+    this.bus.emit('ui:log', { text: t('log.roll', { name: player.name, value }), minor: true });
 
     const { state: next, outcome } = applyRoll(this.state, value);
     if (serverAfter) this.reconcile(next, serverAfter);
@@ -424,6 +425,24 @@ export class Game {
     this.react(winnerId, 'win', 'lose');
     await this.stage.showPodium(ranking);
     this.check(token);
+  }
+
+  // ───────────────────────── Ekspresi ─────────────────────────
+
+  /** Kirim ekspresi: online lewat server (semua anggota room melihat & mendengar), lokal langsung tampil. */
+  expression(id: ExpressionId): void {
+    if (!this.state) return;
+    if (this.online) {
+      this.online.send({ t: 'emote', id });
+      return;
+    }
+    const me = this.state.players.find((p) => !p.isBot);
+    if (me) this.showExpression(me.id, me.name, false, id);
+  }
+
+  private showExpression(playerId: string, name: string, spectator: boolean, id: ExpressionId): void {
+    if (!spectator) this.stage.characters.get(playerId)?.showEmote(expressionEmoji(id));
+    this.bus.emit('expression', { playerId, name, spectator, id });
   }
 
   // ───────────────────────── Bantu ─────────────────────────

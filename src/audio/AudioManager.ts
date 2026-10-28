@@ -27,7 +27,16 @@ export type SfxId =
   | 'pop'
   | 'tick'
   | 'perfect'
-  | 'fizzle';
+  | 'fizzle'
+  // ekspresi (arg = pengali volume, 0 = penuh)
+  | 'x_clap'
+  | 'x_laugh'
+  | 'x_scream'
+  | 'x_cheer'
+  | 'x_wow'
+  | 'x_boo'
+  | 'x_cry'
+  | 'x_love';
 
 // ───────────────────────── Notasi musik ─────────────────────────
 
@@ -745,7 +754,114 @@ export class AudioManager {
       case 'pop':
         this.tone(500, t, 0.08, 'sine', 0.25, o, 1200, 0.05);
         break;
+      default:
+        this.playExpressionSfx(id, t, arg || 1);
     }
+  }
+
+  // ───────────────────────── SFX ekspresi ─────────────────────────
+
+  private playExpressionSfx(id: SfxId, t: number, v: number): void {
+    const o = this.sfxOut;
+    switch (id) {
+      case 'x_clap': {
+        // tepuk tangan beberapa orang: ledakan noise pendek dengan jeda acak, dua lapis "tangan"
+        for (let i = 0; i < 16; i++) {
+          const ti = t + i * 0.075 + Math.random() * 0.035;
+          const fade = 1 - i / 22;
+          this.noise(ti, 0.035, 'bandpass', 1300 + Math.random() * 1400, 0.42 * v * fade, o, undefined, 1.4);
+          this.noise(ti + 0.004, 0.02, 'lowpass', 700, 0.18 * v * fade, o);
+        }
+        break;
+      }
+      case 'x_laugh': {
+        // "ha-ha-ha-ha-ha": suku kata vokal 'a' dengan nada turun + desah 'h'
+        for (let i = 0; i < 5; i++) {
+          const ti = t + i * 0.16;
+          const f0 = 330 - i * 18;
+          this.noise(ti, 0.045, 'bandpass', 1600, 0.08 * v, o, undefined, 1);
+          this.voice(ti + 0.02, 0.11, [f0, f0 * 0.9], [820], [1250], 0.32 * v, o);
+        }
+        break;
+      }
+      case 'x_scream':
+        // "Aaaaa!" melengking: nada naik lalu bergetar, vokal 'a' terang
+        this.voice(t, 1.0, [420, 760, 700, 620], [950, 1050, 1000], [1600, 1750, 1650], 0.34 * v, o, 0.03);
+        this.noise(t, 0.9, 'bandpass', 2600, 0.06 * v, o, 3200, 1.2);
+        break;
+      case 'x_cheer':
+        // "Horee!" + terompet pesta + letusan confetti
+        this.noise(t, 0.06, 'lowpass', 2500, 0.4 * v, o, 400);
+        this.tone(380, t + 0.04, 0.55, 'square', 0.07 * v, o, 540, 0.1);
+        this.voice(t + 0.08, 0.22, [300, 330], [500], [900], 0.26 * v, o);
+        this.voice(t + 0.3, 0.55, [380, 470, 440], [700, 850], [1150, 1500], 0.3 * v, o, 0.02);
+        this.noise(t + 0.25, 0.8, 'bandpass', 1300, 0.12 * v, o, 2000, 0.8);
+        break;
+      case 'x_wow':
+        // "Wooow": vokal 'u' → 'a' → 'u', nada naik-turun
+        this.voice(t, 0.85, [210, 330, 230], [320, 760, 360], [800, 1200, 780], 0.36 * v, o, 0.015);
+        break;
+      case 'x_boo':
+        // "Huuuu" penonton kecewa: beberapa suara rendah vokal 'u', sedikit tidak selaras
+        [128, 136, 145].forEach((f0, k) => this.voice(t + k * 0.04, 1.15, [f0, f0 * 0.88], [320, 300], [720, 680], 0.24 * v, o, 0.01));
+        this.noise(t, 1.0, 'lowpass', 500, 0.08 * v, o);
+        break;
+      case 'x_cry':
+        // "Huhuhu… waaa": isakan pendek lalu ratapan bergetar yang turun
+        for (let i = 0; i < 3; i++) this.voice(t + i * 0.14, 0.09, [460, 420], [400], [900], 0.24 * v, o);
+        this.voice(t + 0.48, 0.8, [520, 470, 380], [420, 650, 430], [1000, 1150, 950], 0.3 * v, o, 0.045);
+        this.noise(t + 1.32, 0.18, 'bandpass', 3800, 0.06 * v, o, 2400, 2); // sesenggukan
+        break;
+      case 'x_love':
+        // "Mwah!" + kilau hati
+        this.noise(t, 0.035, 'lowpass', 1800, 0.35 * v, o);
+        this.voice(t + 0.02, 0.2, [260, 330], [300, 800], [900, 1250], 0.3 * v, o);
+        this.tone(900, t + 0.05, 0.12, 'sine', 0.08 * v, o, 1600, 0.1);
+        [84, 88, 91, 96].forEach((m, k) => this.bell(hz(m), t + 0.3 + k * 0.07, 0.8, 0.11 * v, o));
+        break;
+    }
+  }
+
+  /**
+   * Suara vokal sintetis: sawtooth melewati dua filter formant (F1/F2). Larik nada & formant
+   * dijalankan merata sepanjang `dur` sehingga vokal bisa berubah (mis. "wooow").
+   */
+  private voice(t: number, dur: number, pitch: number[], f1: number[], f2: number[], gain: number, out: Out, vibrato = 0): void {
+    const ctx = this.ctx!;
+    const ramp = (p: AudioParam, values: number[]) => {
+      p.setValueAtTime(values[0], t);
+      values.slice(1).forEach((val, i) => p.linearRampToValueAtTime(val, t + (dur * (i + 1)) / (values.length - 1)));
+    };
+    const o = ctx.createOscillator();
+    o.type = 'sawtooth';
+    ramp(o.frequency, pitch);
+    let lfo: OscillatorNode | null = null;
+    if (vibrato > 0) {
+      lfo = ctx.createOscillator();
+      const lg = ctx.createGain();
+      lfo.frequency.value = 6.5;
+      lg.gain.value = pitch[0] * vibrato;
+      lfo.connect(lg).connect(o.frequency);
+    }
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(gain, t + Math.min(0.03, dur / 4));
+    g.gain.setValueAtTime(gain, t + dur * 0.75);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    for (const [freqs, q, level] of [[f1, 7, 1], [f2, 9, 0.55]] as const) {
+      const f = ctx.createBiquadFilter();
+      f.type = 'bandpass';
+      f.Q.value = q;
+      ramp(f.frequency, [...freqs]);
+      const fg = ctx.createGain();
+      fg.gain.value = level * 2.2; // bandpass sempit memangkas banyak energi
+      o.connect(f).connect(fg).connect(g);
+    }
+    this.connect(g, out, 0.18);
+    o.start(t);
+    o.stop(t + dur + 0.05);
+    lfo?.start(t);
+    lfo?.stop(t + dur + 0.05);
   }
 
   /** Vokal "yaaay" sederhana: sawtooth lewat filter formant yang bergeser. */
@@ -880,6 +996,16 @@ export class AudioManager {
       this.playSfx('womp', 0, 0.95 + duration * 0.92);
     });
     bus.on('turn:forfeit', () => this.playSfx('womp'));
+    // ekspresi penonton lebih pelan dan dijarangkan agar tidak menenggelamkan suara permainan
+    let lastCrowd = 0;
+    bus.on('expression', ({ id, spectator }) => {
+      if (spectator) {
+        const now = performance.now();
+        if (now - lastCrowd < 450) return;
+        lastCrowd = now;
+      }
+      this.playSfx(`x_${id}`, spectator ? 0.55 : 1);
+    });
     bus.on('bonus:six', () => this.playSfx('bonus'));
     bus.on('game:win', () => {
       this.playMusic('victory');

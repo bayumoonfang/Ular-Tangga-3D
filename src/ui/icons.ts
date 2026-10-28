@@ -23,6 +23,11 @@ const PATHS = {
   resume: '<polygon points="7,4.5 19.5,12 7,19.5"/>',
   trophy: '<path d="M7 4h10v5a5 5 0 0 1-10 0z" class="f"/><path d="M7 6H4v1.5A3.5 3.5 0 0 0 7.5 11M17 6h3v1.5a3.5 3.5 0 0 1-3.5 3.5"/><path d="M12 14v3.5M8.5 20h7M10 17.5h4"/>',
   repeat: '<path d="M4 11V9.5A2.5 2.5 0 0 1 6.5 7H18m0 0-3-3m3 3-3 3"/><path d="M20 13v1.5a2.5 2.5 0 0 1-2.5 2.5H6m0 0 3 3m-3-3 3-3"/>',
+  eye: '<path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/>',
+  chat: '<path d="M4 6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5v7a2.5 2.5 0 0 1-2.5 2.5H10l-4.5 4v-4A1.5 1.5 0 0 1 4 14.5z"/>',
+  smile: '<circle cx="12" cy="12" r="9"/><path d="M8 14a5 5 0 0 0 8 0"/><circle cx="9" cy="9.5" r="1" class="f"/><circle cx="15" cy="9.5" r="1" class="f"/>',
+  send: '<path d="M4 12 20 4l-4.5 16-3.5-6.5z" class="f"/>',
+  down: '<path d="m6 9 6 6 6-6"/>',
   wifi: '<path d="M3 9.5a14 14 0 0 1 18 0M6 13a9.5 9.5 0 0 1 12 0M9 16.5a5 5 0 0 1 6 0"/><circle cx="12" cy="19.5" r="0.8" class="f"/>',
 } as const;
 

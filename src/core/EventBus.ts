@@ -1,4 +1,4 @@
-import type { RoomInfo } from '../network/protocol';
+import type { ExpressionId, RoomInfo } from '../network/protocol';
 import type { Phase } from './StateMachine';
 
 export interface GameEvents {
@@ -24,7 +24,10 @@ export interface GameEvents {
   'game:win': { playerId: string; ranking: string[] };
   pause: { paused: boolean };
   'ui:banner': { text: string; kind?: 'info' | 'bonus' | 'bad' };
-  'ui:log': { text: string };
+  /** minor = baris rutin (hasil lemparan) yang tidak perlu masuk umpan chat online */
+  'ui:log': { text: string; minor?: boolean };
+  /** ekspresi (emote + SFX) dari pemain atau penonton */
+  expression: { playerId: string; name: string; spectator: boolean; id: ExpressionId };
 }
 
 type Handler<K extends keyof GameEvents> = (payload: GameEvents[K]) => void;
