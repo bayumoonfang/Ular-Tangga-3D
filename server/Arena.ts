@@ -3,13 +3,15 @@ import {
   ARENA_HP,
   BAG_SIZE,
   ITEM_RESPAWN_MS,
+  ITEM_SHUFFLE_MS,
   ITEMS,
   KO_TILE,
   SHIELD_MAX,
   SHIELD_PER_ITEM,
   absorbDamage,
-  inReach,
+  canHit,
   isItem,
+  itemGlobal,
   itemPierces,
   itemRange,
   randomAttackItem,
@@ -48,6 +50,8 @@ export class RoomArena {
   private tileItems: TileItem[] = [];
   /** item yang menunggu muncul kembali */
   private respawns: { at: number; timer: NodeJS.Timeout }[] = [];
+  private shuffleAt = 0;
+  private shuffleTimer: NodeJS.Timeout | null = null;
   /** satu serangan per lemparan: nomor `turn` saat pemain terakhir menyerang */
   private attackedTurn = new Map<string, number>();
 
@@ -57,6 +61,25 @@ export class RoomArena {
     for (const id of playerIds) this.addPlayer(id);
     const s = this.hooks.state();
     if (s) this.tileItems = spawnItems(rng, s.board, s.players.map((p) => p.position));
+    this.scheduleShuffle();
+  }
+
+  private scheduleShuffle(): void {
+    if (this.shuffleTimer) clearTimeout(this.shuffleTimer);
+    const wait = this.hooks.ms(ITEM_SHUFFLE_MS);
+    this.shuffleAt = Date.now() + wait;
+    this.shuffleTimer = setTimeout(() => this.shuffle(), wait);
+  }
+
+  /** Tiap 2 menit seluruh item di papan diganti sebaran baru (item & petak acak); antrean muncul-ulang dibatalkan. */
+  private shuffle(): void {
+    const s = this.hooks.state();
+    this.respawns.forEach((r) => clearTimeout(r.timer));
+    this.respawns = [];
+    if (s) this.tileItems = spawnItems(rng, s.board, s.players.map((p) => p.position));
+    this.scheduleShuffle();
+    this.event({ kind: 'shuffle' });
+    this.broadcastInfo();
   }
 
   /** Pemain baru (termasuk yang mengisi slot kosong di tengah permainan) mendapat modal awal. */
@@ -82,6 +105,7 @@ export class RoomArena {
       bags: Object.fromEntries(Object.entries(this.bags).map(([k, v]) => [k, [...v]])),
       tileItems: this.tileItems.map((c) => ({ ...c })),
       respawnIn: this.respawns.map((r) => Math.max(0, r.at - now)).sort((a, b) => a - b),
+      shuffleIn: Math.max(0, this.shuffleAt - now),
     };
   }
 
@@ -159,8 +183,9 @@ export class RoomArena {
     const me = s.players.find((p) => p.id === id);
     const target = s.players.find((p) => p.id === targetId);
     if (!me || !target || target.id === id || !this.bags[target.id]) throw new RoomError('Pilih lawan yang mau diserang.');
-    const range = itemRange(raw);
-    if (!inReach(me.position, target.position, range.max, range.min)) {
+    if (!canHit(raw, me.position, target.position)) {
+      if (itemGlobal(raw)) throw new RoomError('Pion di Start belum bisa diserang.');
+      const range = itemRange(raw);
       const r = range.min > 1 ? `${range.min}–${range.max}` : String(range.max);
       throw new RoomError(`Lawan di luar jangkauan ${def.emoji} (jarak ${r} petak).`);
     }
@@ -179,7 +204,7 @@ export class RoomArena {
     this.hp[victim.id] -= hit.damage;
     let ko: string | null = null;
     if (this.hp[victim.id] <= 0) {
-      // darah habis: kembali ke petak 1 dengan darah penuh
+      // darah habis: kembali ke Start dengan darah penuh
       ko = victim.id;
       this.hp[victim.id] = ARENA_HP;
       victim.position = KO_TILE;
@@ -218,12 +243,14 @@ export class RoomArena {
     if (ev.damage) parts.push(`−${ev.damage} darah`);
     if (parts.length) text += ` (${parts.join(', ')})`;
     if (ev.shieldBroken) text += ' — perisai hancur!';
-    if (ev.ko) text += ` — ${this.hooks.name(ev.ko)} K.O., kembali ke petak ${KO_TILE}!`;
+    if (ev.ko) text += ` — ${this.hooks.name(ev.ko)} K.O., kembali ke Start!`;
     return text;
   }
 
   stop(): void {
     this.respawns.forEach((r) => clearTimeout(r.timer));
     this.respawns = [];
+    if (this.shuffleTimer) clearTimeout(this.shuffleTimer);
+    this.shuffleTimer = null;
   }
 }

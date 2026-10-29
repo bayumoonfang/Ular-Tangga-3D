@@ -9,16 +9,20 @@ export const ARENA_HP = 100;
 /** slot tas tiap pemain; tas penuh = item di petak tidak bisa diambil */
 export const BAG_SIZE = 3;
 /** jumlah item yang tersebar di papan */
-export const BOARD_ITEMS = 8;
+export const BOARD_ITEMS = 12;
 /** item yang diambil muncul kembali (item & petak acak) setelah ini (ms) */
 export const ITEM_RESPAWN_MS = 15_000;
+/** seluruh item di papan diacak ulang (item & petak baru) setiap ini (ms) */
+export const ITEM_SHUFFLE_MS = 120_000;
 /** jarak minimal antar petak item: nomor petak & jarak kotak di grid (tidak boleh mepet) */
-export const ITEM_MIN_GAP = 6;
+export const ITEM_MIN_GAP = 4;
 export const ITEM_MIN_GRID = 2;
-/** pion yang darahnya habis kembali ke petak ini */
-export const KO_TILE = 1;
-/** perisai = meter daya tahan: menyerap damage tiap serangan sampai habis */
+/** pion yang darahnya habis kembali ke Start */
+export const KO_TILE = 0;
+/** perisai = meter daya tahan: menyerap sebagian damage tiap serangan sampai habis */
 export const SHIELD_MAX = 100;
+/** bagian damage yang diserap perisai — sisanya tetap mengurangi darah */
+export const SHIELD_ABSORB = 0.5;
 /** daya tahan yang ditambahkan satu item perisai (juga modal awal) */
 export const SHIELD_PER_ITEM = 60;
 
@@ -47,6 +51,8 @@ export interface ItemDef {
   fx?: AttackFx;
   /** menembus perisai (damage langsung ke darah) */
   pierce?: boolean;
+  /** jarak bebas: bisa menyerang lawan di petak mana pun (kecuali Start) */
+  global?: boolean;
 }
 
 export const ITEMS = {
@@ -61,7 +67,9 @@ export const ITEMS = {
   arrow: { emoji: '🏹', kind: 'attack', weight: 3, damage: 25, range: 6, fx: 'straight' },
   lightning: { emoji: '⚡', kind: 'attack', weight: 1, damage: 20, range: 8, fx: 'zap', pierce: true },
   rocket: { emoji: '🚀', kind: 'attack', weight: 2, damage: 30, range: 12, minRange: 2, fx: 'rocket' },
-  meteor: { emoji: '☄️', kind: 'attack', weight: 1, damage: 45, range: 25, minRange: 5, fx: 'meteor' },
+  // jarak bebas — lawan di petak mana pun
+  ufo: { emoji: '🛸', kind: 'attack', weight: 2, damage: 25, global: true, fx: 'zap' },
+  meteor: { emoji: '☄️', kind: 'attack', weight: 1, damage: 40, global: true, fx: 'meteor' },
   // bertahan
   shield: { emoji: '🛡️', kind: 'guard', weight: 4 },
   mirror: { emoji: '🪞', kind: 'guard', weight: 1 },
@@ -94,6 +102,8 @@ export interface ArenaInfo {
   tileItems: TileItem[];
   /** ms sampai item yang sudah diambil muncul kembali (satu angka per item) */
   respawnIn: number[];
+  /** ms sampai seluruh item di papan diacak ulang */
+  shuffleIn: number;
 }
 
 export type ArenaEvent =
@@ -116,12 +126,24 @@ export type ArenaEvent =
       ko: string | null;
     }
   | { kind: 'heal'; playerId: string; item: ItemId; amount: number }
-  | { kind: 'spawn'; tile: number; item: ItemId };
+  | { kind: 'spawn'; tile: number; item: ItemId }
+  | { kind: 'shuffle' };
 
 /** Rentang jarak serang item (selisih nomor petak). */
 export function itemRange(item: ItemId): { min: number; max: number } {
   const def: ItemDef = ITEMS[item];
   return { min: def.minRange ?? 1, max: def.range ?? 0 };
+}
+
+export function itemGlobal(item: ItemId): boolean {
+  return !!(ITEMS[item] as ItemDef).global;
+}
+
+/** Item serang ini bisa mengenai lawan di petak `b` dari petak `a`? (jarak bebas: semua petak kecuali Start) */
+export function canHit(item: ItemId, a: number, b: number): boolean {
+  if (itemGlobal(item)) return a > 0 && b > 0;
+  const r = itemRange(item);
+  return inReach(a, b, r.max, r.min);
 }
 
 export function itemFx(item: ItemId): AttackFx {
@@ -147,9 +169,12 @@ export function inReach(a: number, b: number, max = 1, min = 1): boolean {
   return d >= Math.max(1, min) && d <= max;
 }
 
-/** Serangan mengenai darah setelah perisai menyerap sebanyak daya tahannya. */
+/**
+ * Perisai menyerap sebagian damage (SHIELD_ABSORB, dibatasi sisa daya tahannya); sisanya tetap
+ * mengurangi darah — jadi setiap serangan yang kena selalu terasa di darah.
+ */
 export function absorbDamage(shield: number, damage: number): { absorbed: number; damage: number; shieldLeft: number } {
-  const absorbed = Math.min(shield, damage);
+  const absorbed = Math.min(shield, Math.floor(damage * SHIELD_ABSORB));
   return { absorbed, damage: damage - absorbed, shieldLeft: shield - absorbed };
 }
 

@@ -1207,6 +1207,12 @@ export class AudioManager {
     bus.on('arena:event', ({ ev }) => {
       if (ev.kind === 'heal') this.playSfx('heal');
       else if (ev.kind === 'spawn') this.playSfx('spawn');
+      else if (ev.kind === 'shuffle') {
+        // seluruh item diacak ulang: dua sapuan kilau + desir
+        this.playSfx('spawn');
+        this.playSfx('spawn', 0, 0.25);
+        this.playSfx('whir', 0, 0.05);
+      }
     });
     // suara serangan sesuai gayanya (AttackFx): saat dilepas & saat mengenai sasaran
     const LAUNCH: Record<AttackFx, [SfxId, number][]> = {
@@ -1241,10 +1247,9 @@ export class AudioManager {
         const impact = ev.item === 'snowball' ? (['splat'] as SfxId[]) : IMPACT[itemFx(ev.item)];
         impact.forEach((id, k) => this.playSfx(id, 0, k * 0.04));
         this.playSfx('ouch', 1, 0.14);
-        if (itemHeavy(ev.item)) {
-          this.playSfx('sting', 0, 0.05);
-          this.playSfx('crowd_ooh', 0, 0.3);
-        }
+        if (itemHeavy(ev.item)) this.playSfx('sting', 0, 0.05);
+        // penonton bereaksi setiap serangan yang kena
+        this.playSfx('crowd_ooh', 0, 0.3);
       }
       if (ev.ko) {
         this.playSfx('womp', 0, 0.5);

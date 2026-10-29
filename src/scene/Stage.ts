@@ -20,6 +20,7 @@ const PODIUM_HEIGHTS = [1.1, 0.8, 0.55, 0.35];
 const ITEM_RING_COLORS = { attack: 0xff6b3d, guard: 0x4dabf7, heal: 0x51cf66 } as const;
 const ITEM_RING_GEO = new THREE.TorusGeometry(0.2, 0.025, 8, 32);
 const SHIELD_GEO = new THREE.SphereGeometry(0.5, 24, 16);
+const SHOCK_GEO = new THREE.RingGeometry(0.3, 0.42, 40);
 const itemMaterials = new Map<ItemId, THREE.SpriteMaterial>();
 
 /** Sprite emoji item (kanvas digambar sekali per jenis item). */
@@ -98,6 +99,8 @@ export class Stage {
     const want = new Map(list.map((c) => [c.tile, c.item]));
     for (const [tile, t] of this.items) {
       if (want.get(tile) === t.item) continue;
+      // item lenyap (diacak ulang): kepulan kecil
+      this.effects.sparkle(t.group.position.clone(), 0xe9ecef, 8);
       this.itemGroup.remove(t.group);
       this.items.delete(tile);
     }
@@ -257,6 +260,57 @@ export class Stage {
         },
       }),
     );
+  }
+
+  /** Pion sasaran terpental menjauhi penyerang sambil berputar, lalu kembali ke tempatnya. */
+  knockback(id: string, fromId: string, strength = 1): void {
+    const ch = this.characters.get(id);
+    const from = this.characters.get(fromId);
+    if (!ch) return;
+    const home = ch.root.position.clone();
+    const dir = from && from !== ch ? home.clone().sub(from.root.position).setY(0) : new THREE.Vector3(0, 0, 1);
+    if (dir.lengthSq() < 1e-4) dir.set(0, 0, 1);
+    dir.normalize().multiplyScalar(0.35 * strength);
+    gsap.killTweensOf(ch.root.position);
+    gsap
+      .timeline()
+      .to(ch.root.position, { x: home.x + dir.x, y: home.y + 0.35 * strength, z: home.z + dir.z, duration: 0.16, ease: 'power2.out' })
+      .to(ch.root.position, { x: home.x, y: home.y, z: home.z, duration: 0.45, ease: 'bounce.out' });
+    gsap.to(ch.root.rotation, { y: ch.root.rotation.y + Math.PI * 2 * (strength > 1 ? 2 : 1), duration: 0.6, ease: 'power2.out' });
+  }
+
+  /** Gelombang kejut melingkar di permukaan petak tempat pion berdiri. */
+  shockwave(id: string, color = 0xffa94d, big = false): void {
+    const ch = this.characters.get(id);
+    if (!ch) return;
+    const mat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.85, side: THREE.DoubleSide, depthWrite: false });
+    const ring = new THREE.Mesh(SHOCK_GEO, mat);
+    ring.rotation.x = -Math.PI / 2;
+    ring.position.copy(ch.root.position).setY(TILE_TOP + 0.03);
+    this.itemGroup.add(ring);
+    const end = big ? 5 : 3;
+    gsap.to(ring.scale, { x: end, y: end, z: end, duration: 0.6, ease: 'power2.out' });
+    gsap.to(mat, {
+      opacity: 0,
+      duration: 0.6,
+      ease: 'power1.in',
+      onComplete: () => {
+        this.itemGroup.remove(ring);
+        mat.dispose();
+      },
+    });
+  }
+
+  /** Slow-motion sesaat saat serangan mengenai (hit-stop), lalu kembali normal. */
+  hitStop(ms = 140, scale = 0.15): void {
+    const prev = gsap.globalTimeline.timeScale();
+    if (prev < 0.5) return; // sedang hit-stop
+    gsap.globalTimeline.timeScale(prev * scale);
+    this.sm.timeScale = scale;
+    window.setTimeout(() => {
+      gsap.globalTimeline.timeScale(prev);
+      this.sm.timeScale = 1;
+    }, ms);
   }
 
   /** Gelembung perisai menyerap serangan (`broken` = perisai hancur: pecahan biru). */
@@ -420,16 +474,21 @@ export class Stage {
     await this.sendTo(id, 0);
   }
 
-  /** Pion terlempar dengan lompatan tinggi ke petak tertentu (kalah duel → Start, darah habis → petak 1). */
-  async sendTo(id: string, tile: number): Promise<void> {
+  /**
+   * Pion terlempar dengan lompatan tinggi ke petak tertentu (kalah duel / darah habis → Start).
+   * `dramatic`: melambung jauh lebih tinggi sambil berputar (K.O.).
+   */
+  async sendTo(id: string, tile: number, dramatic = false): Promise<void> {
     const ch = this.characters.get(id);
     if (!ch) return;
     const from = ch.tile;
     if (from === tile) return;
-    this.effects.sparkle(ch.root.position.clone(), 0xff6b6b, 14);
+    this.effects.sparkle(ch.root.position.clone(), 0xff6b6b, dramatic ? 30 : 14);
     ch.tile = tile;
     this.layoutTile(from);
-    await ch.hopTo(this.slotPosition(tile, id), 1.1, 3.2);
+    if (dramatic) gsap.to(ch.root.rotation, { y: ch.root.rotation.y + Math.PI * 6, duration: 1.6, ease: 'power1.inOut' });
+    await ch.hopTo(this.slotPosition(tile, id), dramatic ? 1.6 : 1.1, dramatic ? 7 : 3.2);
+    if (dramatic) this.effects.burstConfetti(ch.root.position.clone().setY(0.4), 40, 2.4);
     this.layoutTile(tile);
     ch.faceCamera();
   }

@@ -10,7 +10,7 @@ import type { SceneManager } from '../scene/SceneManager';
 import type { Stage } from '../scene/Stage';
 import { createRng, randomSeed, type Rng } from '../utils/random';
 import { settings } from '../utils/settings';
-import { ARENA_HP, BAG_SIZE, ITEMS, KO_TILE, SHIELD_PER_ITEM, inReach, itemFx, itemHeavy, itemRange, type ArenaEvent, type ArenaInfo, type ItemId, type TileItem } from './Arena';
+import { ARENA_HP, BAG_SIZE, ITEMS, KO_TILE, SHIELD_PER_ITEM, canHit, itemFx, itemHeavy, type ArenaEvent, type ArenaInfo, type AttackFx, type ItemId, type TileItem } from './Arena';
 import { EventBus } from './EventBus';
 import { createInitialState, currentPlayer, type GameState, type PlayerState } from './GameState';
 import { StateMachine } from './StateMachine';
@@ -34,6 +34,18 @@ const SAVE_KEY = 'sl3d.save';
 const DEV_SPEED = import.meta.env.DEV ? Number(new URLSearchParams(location.search).get('speed')) || 1 : 1;
 
 class Cancelled extends Error {}
+
+/** teks komik saat serangan mengenai, sesuai gayanya */
+const IMPACT_WORDS: Record<AttackFx, string> = {
+  melee: 'POW!',
+  lob: 'BOOM!',
+  straight: 'THWACK!',
+  spin: 'WHAM!',
+  flame: 'FWOOSH!',
+  rocket: 'KABOOM!',
+  zap: 'ZZZAP!',
+  meteor: 'KA-BLAM!',
+};
 
 type TurnResult = Extract<ServerMsg, { t: 'turn_result' }>;
 type FightEnd = Extract<ServerMsg, { t: 'fight_end' }>;
@@ -88,6 +100,8 @@ export class Game {
   arena: ArenaInfo | null = null;
   /** item yang sudah diambil di server tapi pionnya belum tiba (tetap tampil di papan & belum masuk tas) */
   private heldItems = new Map<number, { playerId: string; item: ItemId }>();
+  /** darah & perisai yang ditampilkan untuk pion yang sedang diserang: baru turun saat serangannya mengenai */
+  private hitHold = new Map<string, { hp: number; shield: number }>();
   /** nomor lemparan (state.turn) saat perangkat ini terakhir menyerang — satu serangan per lemparan */
   private attackedTurn = -1;
 
@@ -250,6 +264,7 @@ export class Game {
     this.fightWaiter = null;
     this.arena = null;
     this.heldItems.clear();
+    this.hitHold.clear();
     this.attackedTurn = -1;
     gsap.globalTimeline.clear();
     gsap.globalTimeline.paused(false).timeScale(DEV_SPEED);
@@ -341,11 +356,13 @@ export class Game {
   // ───────────────────────── Arena ─────────────────────────
 
   arenaHp(id: string): number {
-    return this.arena?.hp[id] ?? ARENA_HP;
+    return this.hitHold.get(id)?.hp ?? this.arena?.hp[id] ?? ARENA_HP;
   }
 
   /** Daya tahan perisai yang ditampilkan (perisai yang pionnya belum tiba belum dihitung). */
   arenaShield(id: string): number {
+    const hold = this.hitHold.get(id);
+    if (hold) return hold.shield;
     let held = 0;
     for (const h of this.heldItems.values()) if (h.playerId === id && h.item === 'shield') held += SHIELD_PER_ITEM;
     return Math.max(0, (this.arena?.shield[id] ?? 0) - held);
@@ -372,14 +389,13 @@ export class Game {
     return this.arenaPlayer && this.canRoll() && this.attackedTurn !== this.state.turn;
   }
 
-  /** Lawan dalam jangkauan item serang ini (selisih nomor petak sesuai jarak item). */
+  /** Lawan dalam jangkauan item serang ini (sesuai jarak item; jarak bebas = semua lawan yang tidak di Start). */
   targetsInReach(item: ItemId): PlayerState[] {
     const net = this.online;
     if (!net || !this.state || !this.arena) return [];
     const me = this.state.players.find((p) => p.id === net.myId);
     if (!me) return [];
-    const r = itemRange(item);
-    return this.state.players.filter((p) => p.id !== me.id && p.id in this.arena!.bags && inReach(me.position, p.position, r.max, r.min));
+    return this.state.players.filter((p) => p.id !== me.id && p.id in this.arena!.bags && canHit(item, me.position, p.position));
   }
 
   useItem(item: ItemId, targetId?: string): void {
@@ -421,49 +437,81 @@ export class Game {
     const chars = this.stage.characters;
     if (ev.kind === 'attack') {
       if (ev.playerId === this.online?.myId) this.attackedTurn = this.state.turn;
+      // tampilan darah/perisai si terkena ditahan sampai proyektilnya tiba (pesan 'arena' datang sesudah ini)
+      if (!this.hitHold.has(ev.victimId)) this.hitHold.set(ev.victimId, { hp: this.arenaHp(ev.victimId), shield: this.arenaShield(ev.victimId) });
       // state langsung mengikuti server; animasinya menyusul
       const koPlayer = ev.ko ? this.state.players.find((x) => x.id === ev.ko) : undefined;
       if (koPlayer) koPlayer.position = KO_TILE;
-      this.playAttack(ev, this.token).catch(() => undefined); // dibatalkan bila game keluar
+      this.playAttack(ev, this.token).catch(() => this.hitHold.delete(ev.victimId)); // dibatalkan bila game keluar
     } else if (ev.kind === 'heal') {
       chars.get(ev.playerId)?.showEmote(`❤️+${ev.amount}`, 1400);
+      chars.get(ev.playerId)?.showImpact(`+${ev.amount}`, 'heal');
       this.stage.glow(ev.playerId, 0x69db7c);
+    } else if (ev.kind === 'shuffle') {
+      this.bus.emit('ui:banner', { text: t('arena.shuffled'), kind: 'bonus' });
+      this.bus.emit('ui:log', { text: t('arena.shuffled') });
     }
     this.bus.emit('arena:event', { ev });
   }
 
-  /** Animasi serangan: penyerang meluncurkan item → (dipantulkan cermin) → kena: perisai menyerap / darah berkurang. */
+  /**
+   * Animasi serangan (terlihat semua anggota room): kamera menyorot sasaran, penyerang meluncurkan
+   * item → (dipantulkan cermin) → kena: hit-stop, ledakan + gelombang kejut, pion terpental, teks
+   * komik besar, darah/perisai di HUD baru turun; K.O. = pion melambung kembali ke Start.
+   */
   private async playAttack(ev: Extract<ArenaEvent, { kind: 'attack' }>, token: number): Promise<void> {
     const chars = this.stage.characters;
+    const victim = ev.victimId;
+    const heavy = itemHeavy(ev.item);
+    const fx = itemFx(ev.item);
+    const target = chars.get(ev.outcome === 'reflected' ? ev.targetId : victim);
+    if (target) void this.stage.camera.shot(target.root.position.clone(), heavy ? 4.2 : 5.2, ev.outcome === 'reflected' ? 2.2 : 1.4);
     chars.get(ev.playerId)?.showEmote(ITEMS[ev.item].emoji, 1000);
+    chars.get(ev.playerId)?.showImpact(t('arena.cry'), 'hit');
     if (chars.has(ev.playerId)) void this.stage.pulsePose(ev.playerId, 'cheer', 0.5);
     this.bus.emit('arena:launch', { ev });
     await this.stage.projectile(ev.playerId, ev.targetId, ev.item);
     this.check(token);
     if (ev.outcome === 'reflected') {
       chars.get(ev.targetId)?.showEmote('🪞', 1200);
+      chars.get(ev.targetId)?.showImpact(t('arena.reflectWord'), 'shield');
       this.stage.glow(ev.targetId, 0xe599f7);
       this.bus.emit('arena:reflect', { ev });
       await this.stage.projectile(ev.targetId, ev.playerId, ev.item);
       this.check(token);
     }
-    const victim = ev.victimId;
+
+    // ── kena ──
+    this.hitHold.delete(victim);
+    if (ev.ko) this.hitHold.set(victim, { hp: 0, shield: 0 });
+    const attacker = ev.outcome === 'reflected' ? ev.targetId : ev.playerId;
     if (ev.absorbed > 0) this.stage.shieldHit(victim, ev.shieldBroken);
     if (ev.damage > 0) {
-      const fx = itemFx(ev.item);
       const color = fx === 'zap' ? 0xfff3bf : ev.item === 'snowball' ? 0xa5d8ff : fx === 'flame' ? 0xff6b00 : fx === 'straight' ? 0xff4d6d : 0xff6b3d;
-      this.stage.blast(victim, color, itemHeavy(ev.item));
-      if (chars.has(victim)) void this.stage.pulsePose(victim, 'scared', 0.7);
+      this.stage.blast(victim, color, heavy);
+      this.stage.shockwave(victim, color, heavy);
+      this.stage.knockback(victim, attacker, heavy ? 1.6 : 1);
+      this.stage.hitStop(heavy ? 200 : 110);
+      if (chars.has(victim)) void this.stage.pulsePose(victim, 'scared', 0.8);
     }
-    const label = [ev.damage > 0 ? `💥−${ev.damage}` : '', ev.absorbed > 0 ? `🛡️−${ev.absorbed}` : ''].filter(Boolean).join(' ');
-    chars.get(victim)?.showEmote(ev.shieldBroken && !ev.damage ? '🛡️💔' : label, 1500);
+    const ch = chars.get(victim);
+    const word = ev.item === 'snowball' ? 'SPLAT!' : IMPACT_WORDS[fx];
+    if (ev.damage > 0) {
+      ch?.showImpact(word, heavy ? 'big' : 'hit');
+      ch?.showImpact(`−${ev.damage}`, heavy ? 'big' : 'hit', 220);
+    }
+    if (ev.absorbed > 0) ch?.showImpact(ev.shieldBroken ? t('arena.shieldBrokeWord') : `🛡️−${ev.absorbed}`, 'shield', ev.damage > 0 ? 420 : 0);
     this.bus.emit('arena:impact', { ev });
+    this.bus.emit('arena:update', {});
     if (ev.ko) {
       const name = this.state.players.find((p) => p.id === ev.ko)?.name ?? '?';
+      ch?.showImpact('K.O.!', 'ko', 500);
       this.bus.emit('ui:banner', { text: t('arena.koBanner', { name }), kind: 'bad' });
-      await this.stage.sleep(0.5);
+      await this.stage.sleep(0.7);
       this.check(token);
-      await this.stage.sendTo(ev.ko, KO_TILE);
+      await this.stage.sendTo(ev.ko, KO_TILE, true);
+      this.hitHold.delete(victim);
+      this.bus.emit('arena:update', {});
       this.bus.emit('move:step', { playerId: ev.ko, tile: KO_TILE, stepIndex: 0, total: 0 });
     }
   }

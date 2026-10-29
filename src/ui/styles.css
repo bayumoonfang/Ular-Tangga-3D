@@ -3107,3 +3107,91 @@ body.rm .reaction {
     height: 36px;
   }
 }
+
+/* ───────── teks dampak serangan (komik) di atas pion ───────── */
+.char-label {
+  position: relative;
+}
+.char-impact {
+  position: absolute;
+  left: 50%;
+  bottom: 100%;
+  white-space: nowrap;
+  font-size: 30px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  color: #fff;
+  -webkit-text-stroke: 5px #c92a2a;
+  paint-order: stroke fill;
+  text-shadow: 0 4px 0 rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+  animation: char-impact 1.4s cubic-bezier(0.2, 0.9, 0.3, 1.3) both;
+}
+.char-impact.big {
+  font-size: 44px;
+  color: #ffe066;
+  -webkit-text-stroke: 7px #d9480f;
+}
+.char-impact.shield {
+  font-size: 22px;
+  -webkit-text-stroke: 5px #1864ab;
+}
+.char-impact.heal {
+  font-size: 24px;
+  -webkit-text-stroke: 5px #2b8a3e;
+}
+.char-impact.ko {
+  font-size: 52px;
+  color: #ff8787;
+  -webkit-text-stroke: 8px #212529;
+}
+@keyframes char-impact {
+  0% { opacity: 0; transform: translate(-50%, 20px) scale(0.2) rotate(var(--tilt)); }
+  14% { opacity: 1; transform: translate(-50%, -10px) scale(1.45) rotate(var(--tilt)); }
+  24% { transform: translate(-50%, -8px) scale(1) rotate(var(--tilt)); }
+  30% { transform: translate(calc(-50% - 4px), -8px) scale(1.02) rotate(var(--tilt)); }
+  36% { transform: translate(calc(-50% + 4px), -8px) scale(1) rotate(var(--tilt)); }
+  80% { opacity: 1; }
+  100% { opacity: 0; transform: translate(-50%, -46px) scale(0.95) rotate(var(--tilt)); }
+}
+body.rm .char-impact {
+  animation: none !important;
+  transform: translate(-50%, -8px);
+}
+/* kilat putih layar untuk semua (serangan berat) */
+.hit-flash.boom {
+  background: rgba(255, 255, 255, 0.55);
+  animation: hit-flash 0.35s ease-out both;
+}
+/* kartu pemain yang terkena: bergetar & merah sesaat */
+.pcard.hurt {
+  animation: pcard-hurt 0.55s ease;
+}
+@keyframes pcard-hurt {
+  0% { background: #ffc9c9; transform: translateX(0); }
+  20% { transform: translateX(-6px); }
+  40% { transform: translateX(6px); }
+  60% { transform: translateX(-3px); }
+  100% { background: var(--card); transform: translateX(0); }
+}
+.pdmg {
+  position: absolute;
+  right: 10px;
+  top: 6px;
+  font-weight: 800;
+  font-size: 1.15rem;
+  color: #e03131;
+  pointer-events: none;
+  animation: pdmg 1.2s ease-out both;
+}
+.pdmg.shield {
+  top: 28px;
+  font-size: 0.9rem;
+  color: #1c7ed6;
+}
+@keyframes pdmg {
+  0% { opacity: 0; transform: translateY(8px) scale(0.6); }
+  15% { opacity: 1; transform: translateY(0) scale(1.25); }
+  75% { opacity: 1; }
+  100% { opacity: 0; transform: translateY(-18px); }
+}

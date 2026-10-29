@@ -396,6 +396,18 @@ export class Character {
     gsap.to(this.root.scale, { x: 1, y: 1, z: 1, duration: 0.5, ease: 'back.out(2.2)' });
   }
 
+  /** Teks dampak komik besar di atas pion (mis. "BOOM!" / "−40"); beberapa bisa tampil bertumpuk. */
+  showImpact(text: string, kind: 'hit' | 'big' | 'shield' | 'heal' | 'ko', delay = 0): void {
+    window.setTimeout(() => {
+      const el = document.createElement('span');
+      el.className = `char-impact ${kind}`;
+      el.textContent = text;
+      el.style.setProperty('--tilt', `${Math.round((Math.random() - 0.5) * 24)}deg`);
+      this.labelEl.append(el);
+      window.setTimeout(() => el.remove(), 1500);
+    }, delay);
+  }
+
   showEmote(emoji: string, ms = 1800): void {
     this.emoteEl.textContent = emoji;
     this.emoteEl.classList.remove('show');

@@ -16,6 +16,7 @@ import {
   ITEM_MIN_GAP,
   SHIELD_MAX,
   SHIELD_PER_ITEM,
+  canHit,
   inReach,
   isItem,
   itemRange,
@@ -948,49 +949,55 @@ describe('mode arena', () => {
     room.destroy();
   });
 
-  it('serangan: giliran sendiri & dalam jangkauan senjata; perisai menyerap damage', async () => {
+  it('serangan: giliran sendiri & dalam jangkauan; perisai menyerap separuh, darah selalu berkurang', async () => {
     const { room, inbox, arena, mover, other, place } = await arenaRoom('ARN005');
     arena().bags[mover.id] = ['punch', 'rocket', 'bomb'];
+    arena().bags[other.id] = ['punch'];
     place(30, 32);
     expect(() => room.useItem(other.id, 'punch', mover.id)).toThrow(/giliranmu/);
     expect(() => room.useItem(mover.id, 'punch', other.id)).toThrow(/jangkauan/);
-    expect(() => room.useItem(mover.id, 'rocket', other.id)).not.toThrow(); // jarak 2 → roket bisa
-    let ev = lastAttack(inbox);
-    expect(ev).toMatchObject({ outcome: 'hit', victimId: other.id, absorbed: 30, damage: 0, shieldBroken: false });
-    expect(arena().shield[other.id]).toBe(SHIELD_PER_ITEM - 30);
-    expect(arena().hp[other.id]).toBe(ARENA_HP);
+    room.useItem(mover.id, 'rocket', other.id); // jarak 2 → roket bisa
+    expect(lastAttack(inbox)).toMatchObject({ outcome: 'hit', victimId: other.id, absorbed: 15, damage: 15, shieldBroken: false });
+    expect(arena().shield[other.id]).toBe(SHIELD_PER_ITEM - 15);
+    expect(arena().hp[other.id]).toBe(ARENA_HP - 15);
     expect(() => room.useItem(mover.id, 'bomb', other.id)).toThrow(/Satu serangan/);
 
-    // giliran berikutnya: bom 40 menghabiskan sisa perisai 30, 10 mengenai darah
+    // giliran berikutnya: perisai tinggal 10 → hanya 10 yang terserap, perisai hancur
     const s = (room as unknown as { state: GameState }).state;
     s.turn += 1;
+    arena().shield[other.id] = 10;
     room.useItem(mover.id, 'bomb', other.id);
-    ev = lastAttack(inbox);
-    expect(ev).toMatchObject({ absorbed: 30, damage: 10, shieldBroken: true });
+    expect(lastAttack(inbox)).toMatchObject({ absorbed: 10, damage: 30, shieldBroken: true });
     expect(arena().shield[other.id]).toBe(0);
-    expect(arena().hp[other.id]).toBe(ARENA_HP - 10);
+    expect(arena().hp[other.id]).toBe(ARENA_HP - 15 - 30);
     room.destroy();
   });
 
-  it('petir menembus perisai; meteor hanya jarak jauh (5–25)', async () => {
+  it('petir menembus perisai; UFO & meteor menyerang lawan di petak mana pun (kecuali Start)', async () => {
     const { room, inbox, arena, mover, other, place } = await arenaRoom('ARN008');
     const s = (room as unknown as { state: GameState }).state;
-    arena().bags[mover.id] = ['lightning', 'meteor'];
+    arena().bags[mover.id] = ['lightning', 'meteor', 'ufo'];
     place(20, 27);
     room.useItem(mover.id, 'lightning', other.id);
     expect(lastAttack(inbox)).toMatchObject({ absorbed: 0, damage: 20, shieldBroken: false });
     expect(arena().shield[other.id]).toBe(SHIELD_PER_ITEM);
     expect(arena().hp[other.id]).toBe(ARENA_HP - 20);
     s.turn += 1;
-    place(20, 23);
-    expect(() => room.useItem(mover.id, 'meteor', other.id)).toThrow(/jangkauan/);
-    place(20, 45);
+    place(3, 97); // jauh sekali
     room.useItem(mover.id, 'meteor', other.id);
-    expect(lastAttack(inbox)).toMatchObject({ absorbed: 45, damage: 0 });
+    expect(lastAttack(inbox)).toMatchObject({ absorbed: 20, damage: 20 });
+    s.turn += 1;
+    place(50, 0); // lawan di Start: tidak bisa
+    expect(() => room.useItem(mover.id, 'ufo', other.id)).toThrow(/Start/);
+    place(50, 50); // petak yang sama pun bisa
+    room.useItem(mover.id, 'ufo', other.id);
+    expect(lastAttack(inbox)).toMatchObject({ item: 'ufo', victimId: other.id });
+    expect(canHit('ufo', 1, 99)).toBe(true);
+    expect(canHit('meteor', 0, 40)).toBe(false);
     room.destroy();
   });
 
-  it('roket menyerang dari jauh; darah habis = kembali ke petak 1 dengan darah penuh', async () => {
+  it('darah habis karena serangan: kembali ke Start dengan darah penuh', async () => {
     const { room, inbox, arena, state, mover, other, place } = await arenaRoom('ARN006');
     arena().bags[mover.id] = ['rocket'];
     place(20, 32);
@@ -998,23 +1005,44 @@ describe('mode arena', () => {
     arena().hp[other.id] = 25;
     room.useItem(mover.id, 'rocket', other.id);
     expect(lastAttack(inbox)).toMatchObject({ kind: 'attack', outcome: 'hit', damage: 30, ko: other.id });
-    expect(state().players.find((p) => p.id === other.id)!.position).toBe(1);
+    expect(state().players.find((p) => p.id === other.id)!.position).toBe(0);
     expect(arena().hp[other.id]).toBe(ARENA_HP);
     room.destroy();
   });
 
-  it('cermin memantulkan serangan ke penyerang (perisai penyerang ikut menyerap)', async () => {
+  it('cermin memantulkan serangan ke penyerang (perisai penyerang ikut menyerap separuh)', async () => {
     const { room, inbox, arena, mover, other, place } = await arenaRoom('ARN007');
     arena().bags[mover.id] = ['bomb'];
     arena().bags[other.id] = ['mirror'];
     place(12, 14);
     room.useItem(mover.id, 'bomb', other.id);
-    expect(lastAttack(inbox)).toMatchObject({ outcome: 'reflected', victimId: mover.id, absorbed: 40, damage: 0 });
+    expect(lastAttack(inbox)).toMatchObject({ outcome: 'reflected', victimId: mover.id, absorbed: 20, damage: 20 });
     expect(arena().bags[other.id]).toEqual([]);
-    expect(arena().shield[mover.id]).toBe(SHIELD_PER_ITEM - 40);
-    expect(arena().shield[other.id]).toBe(SHIELD_PER_ITEM);
+    expect(arena().shield[mover.id]).toBe(SHIELD_PER_ITEM - 20);
+    expect(arena().hp[mover.id]).toBe(ARENA_HP - 20);
+    expect(arena().hp[other.id]).toBe(ARENA_HP);
     room.destroy();
   });
+
+  it('seluruh item di papan diacak ulang tiap 2 menit (antrean muncul-ulang dibatalkan)', async () => {
+    const { room, inbox, arena, state, mover } = await arenaRoom('ARN009');
+    const s = state();
+    s.players.find((p) => p.id === mover.id)!.position = 10;
+    const rng = createRng(1);
+    rng.setState(s.rngState);
+    const target = 10 + rollDie(rng, false);
+    arena().tileItems = [{ tile: target, item: 'apple' }];
+    room.handleRoll(mover.id); // diambil → antre muncul lagi 15 dtk (150 ms)
+    expect(arena().respawns).toHaveLength(1);
+    const info = inbox.filter((m) => m.t === 'arena').pop() as Extract<ServerMsg, { t: 'arena' }>;
+    expect(info.arena.shuffleIn).toBeGreaterThan(0);
+    // 120 dtk × 0,01 = 1,2 dtk
+    for (let i = 0; i < 300 && !inbox.some((m) => m.t === 'arena_event' && m.ev.kind === 'shuffle'); i++) await sleep(10);
+    expect(inbox.some((m) => m.t === 'arena_event' && m.ev.kind === 'shuffle')).toBe(true);
+    expect(arena().tileItems.length).toBeGreaterThanOrEqual(8);
+    expect(arena().respawns).toHaveLength(0);
+    room.destroy();
+  }, 10000);
 
   it('pemain baru yang mengisi slot kosong mendapat modal arena', async () => {
     const [host, b, c] = await startGame(3);

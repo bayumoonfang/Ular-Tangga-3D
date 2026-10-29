@@ -1,5 +1,5 @@
 import { CHARACTERS, CHARGE_FILL_SECONDS, CHARGE_OVERHEAT_GRACE, CHARGE_PERFECT_FROM, TILE_COUNT } from '../config';
-import { ARENA_HP, BAG_SIZE, ITEMS, SHIELD_MAX, itemHeavy, itemPierces, itemRange, type ItemId } from '../core/Arena';
+import { ARENA_HP, BAG_SIZE, ITEMS, SHIELD_MAX, itemGlobal, itemHeavy, itemPierces, itemRange, type ItemId } from '../core/Arena';
 import type { Game } from '../core/Game';
 import { onLangChange, t } from '../i18n';
 import { EXPRESSIONS, expressionEmoji, type ExpressionId } from '../network/protocol';
@@ -42,6 +42,9 @@ export class HUD {
   /** Mode Arena: tas item 3 slot (kanan tengah) + pemilih target serangan */
   private arenaDock = h('div', { class: 'arena-dock hidden' });
   private respawnEl = h('small', { class: 'arena-respawn' });
+  /** hitung mundur acak ulang seluruh item di papan */
+  private shuffleEl = h('small', { class: 'arena-respawn shuffle' });
+  private shuffleAt = 0;
   private targetPop = h('div', { class: 'target-pop hidden', role: 'menu' });
   /** kilat merah layar saat perangkat ini terkena serangan */
   private hitFlash = h('div', { class: 'hit-flash', 'aria-hidden': 'true' });
@@ -154,6 +157,7 @@ export class HUD {
     bus.on('arena:update', () => {
       const now = Date.now();
       this.respawnAt = (game.arena?.respawnIn ?? []).map((ms) => now + ms);
+      this.shuffleAt = now + (game.arena?.shuffleIn ?? 0);
       this.renderArena();
     });
     bus.on('arena:event', () => this.renderArena());
@@ -166,6 +170,9 @@ export class HUD {
         else this.showBanner(t('arena.youBlocked', { n: ev.absorbed }), 'info');
       }
       if (ev.victimId === me || (heavy && ev.damage > 0)) this.shakeScreen(ev.victimId === me && heavy ? 'big' : 'small');
+      // serangan berat ke pemain lain: kilat putih untuk semua yang menonton
+      if (ev.victimId !== me && heavy && ev.damage > 0) this.restartAnim(this.hitFlash, 'boom');
+      this.cardHit(ev.victimId, ev.damage, ev.absorbed);
       this.renderArena();
     });
     for (const ev of ['turn:start', 'move:step', 'fight:end'] as const) bus.on(ev, () => this.renderArena());
@@ -383,6 +390,7 @@ export class HUD {
         h('b', null, '🎒 ', `${bag.length}/${BAG_SIZE}`),
         h('span', { class: `arena-shield ${sh > 0 ? '' : 'none'}`, title: `${t('arena.shield')} ${sh}/${SHIELD_MAX}` }, '🛡️', String(sh)),
         this.respawnEl,
+        this.shuffleEl,
       ),
       h('div', { class: 'arena-items' }, ...Array.from({ length: BAG_SIZE }, (_, i) => slot(i))),
       this.targetPop,
@@ -458,8 +466,24 @@ export class HUD {
     canvas.classList.add(`shake-${size}`);
   }
 
+  /** Kartu pemain yang terkena: bergetar merah + angka damage melayang. */
+  private cardHit(id: string, damage: number, absorbed: number): void {
+    const card = this.cards.get(id);
+    if (!card) return;
+    card.el.classList.remove('hurt');
+    void card.el.offsetWidth;
+    card.el.classList.add('hurt');
+    const pops: HTMLElement[] = [];
+    if (damage > 0) pops.push(h('b', { class: 'pdmg' }, `−${damage}`));
+    if (absorbed > 0) pops.push(h('b', { class: 'pdmg shield' }, `🛡️−${absorbed}`));
+    for (const el of pops) {
+      card.el.append(el);
+      window.setTimeout(() => el.remove(), 1300);
+    }
+  }
+
   private restartAnim(el: HTMLElement, cls: string): void {
-    el.classList.remove('show', 'shield');
+    el.classList.remove('show', 'shield', 'boom');
     void el.offsetWidth;
     el.classList.add(cls);
   }
@@ -471,6 +495,9 @@ export class HUD {
     const next = this.respawnAt.filter((at) => at > now).sort((a, b) => a - b)[0];
     this.respawnEl.textContent = next ? `✨${Math.ceil((next - now) / 1000)}s` : '';
     this.respawnEl.title = next ? t('arena.nextItem', { n: Math.ceil((next - now) / 1000) }) : '';
+    const left = Math.max(0, Math.ceil((this.shuffleAt - now) / 1000));
+    this.shuffleEl.textContent = `🔀${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`;
+    this.shuffleEl.title = t('arena.shuffleIn', { n: left });
     setVisible(this.respawnEl, !!next);
   }
 
@@ -623,8 +650,9 @@ export class HUD {
   }
 }
 
-/** Jarak serang item, mis. "1", "≤3", "2–12". */
+/** Jarak serang item, mis. "1", "1–3", "2–12", "∞" (jarak bebas). */
 function rangeText(id: ItemId): string {
+  if (itemGlobal(id)) return '∞';
   const r = itemRange(id);
   return r.min > 1 ? `${r.min}–${r.max}` : r.max === 1 ? '1' : `1–${r.max}`;
 }
@@ -637,7 +665,7 @@ function rangeLabel(id: ItemId): string {
 function itemDesc(id: ItemId): string {
   const def = ITEMS[id];
   if (def.kind !== 'attack') return `${t(`item.${id}.desc`)}${def.kind === 'guard' ? ` (${t('arena.guardAutoShort')})` : ''}`;
-  const base = t('arena.descAttack', { d: def.damage, r: rangeText(id) });
+  const base = itemGlobal(id) ? t('arena.descGlobal', { d: def.damage }) : t('arena.descAttack', { d: def.damage, r: rangeText(id) });
   return itemPierces(id) ? `${base} · ${t('arena.pierce')}` : base;
 }
 
