@@ -10,6 +10,7 @@ import type { SceneManager } from '../scene/SceneManager';
 import type { Stage } from '../scene/Stage';
 import { createRng, randomSeed, type Rng } from '../utils/random';
 import { settings } from '../utils/settings';
+import { ARENA_HP, BAG_SIZE, ITEMS, KO_TILE, SHIELD_PER_ITEM, inReach, itemFx, itemHeavy, itemRange, type ArenaEvent, type ArenaInfo, type ItemId, type TileItem } from './Arena';
 import { EventBus } from './EventBus';
 import { createInitialState, currentPlayer, type GameState, type PlayerState } from './GameState';
 import { StateMachine } from './StateMachine';
@@ -83,6 +84,12 @@ export class Game {
   private fightsAwaited = 0;
   private fightEnds: FightEnd[] = [];
   private fightWaiter: (() => void) | null = null;
+  /** Mode Arena (online): state terakhir dari server; null = mode arena mati / lawan komputer */
+  arena: ArenaInfo | null = null;
+  /** item yang sudah diambil di server tapi pionnya belum tiba (tetap tampil di papan & belum masuk tas) */
+  private heldItems = new Map<number, { playerId: string; item: ItemId }>();
+  /** nomor lemparan (state.turn) saat perangkat ini terakhir menyerang — satu serangan per lemparan */
+  private attackedTurn = -1;
 
   constructor(
     readonly bus: EventBus,
@@ -135,6 +142,7 @@ export class Game {
     this.offs = [
       net.on('turn_result', (m) => {
         if (m.fight) this.fightsAwaited++;
+        if (m.pickup) this.heldItems.set(m.pickup.tile, { playerId: m.playerId, item: m.pickup.item });
         this.results.push(m);
         this.resultWaiter?.();
       }),
@@ -161,6 +169,12 @@ export class Game {
       // siaran server sampai ke semua anggota room, termasuk pengirimnya sendiri
       net.on('emote', ({ playerId, name, spectator, id }) => this.showExpression(playerId, name, spectator, id)),
       net.on('room_state', ({ room }) => this.bus.emit('net:room', { room })),
+      net.on('arena', ({ arena }) => {
+        this.arena = arena;
+        this.syncItems();
+        this.bus.emit('arena:update', {});
+      }),
+      net.on('arena_event', ({ ev }) => this.onArenaEvent(ev)),
     ];
     // tombol lempar ditahan: beri tahu server kapan mulai mengisi tenaga (server yang menilai "sempurna")
     this.offs.push(this.bus.on('charge:start', () => net.send({ t: 'charge_start' })));
@@ -234,6 +248,9 @@ export class Game {
     this.fightsAwaited = 0;
     this.fightEnds = [];
     this.fightWaiter = null;
+    this.arena = null;
+    this.heldItems.clear();
+    this.attackedTurn = -1;
     gsap.globalTimeline.clear();
     gsap.globalTimeline.paused(false).timeScale(DEV_SPEED);
     this.scene.timeScale = 1;
@@ -319,6 +336,136 @@ export class Game {
       };
       take();
     });
+  }
+
+  // ───────────────────────── Arena ─────────────────────────
+
+  arenaHp(id: string): number {
+    return this.arena?.hp[id] ?? ARENA_HP;
+  }
+
+  /** Daya tahan perisai yang ditampilkan (perisai yang pionnya belum tiba belum dihitung). */
+  arenaShield(id: string): number {
+    let held = 0;
+    for (const h of this.heldItems.values()) if (h.playerId === id && h.item === 'shield') held += SHIELD_PER_ITEM;
+    return Math.max(0, (this.arena?.shield[id] ?? 0) - held);
+  }
+
+  /** Isi tas yang ditampilkan: item yang pionnya belum tiba di petaknya belum dihitung. */
+  arenaBag(id: string): ItemId[] {
+    const bag = [...(this.arena?.bags[id] ?? [])];
+    for (const h of this.heldItems.values()) {
+      if (h.playerId !== id || h.item === 'shield') continue;
+      const i = bag.lastIndexOf(h.item);
+      if (i >= 0) bag.splice(i, 1);
+    }
+    return bag;
+  }
+
+  /** Perangkat ini pemain di Mode Arena (bukan penonton). */
+  get arenaPlayer(): boolean {
+    return !!this.arena && !!this.online && !this.online.isSpectator && this.online.myId in this.arena.bags;
+  }
+
+  /** Boleh menyerang sekarang: giliran sendiri, sebelum melempar (server tetap memeriksa ulang). */
+  canAttack(): boolean {
+    return this.arenaPlayer && this.canRoll() && this.attackedTurn !== this.state.turn;
+  }
+
+  /** Lawan dalam jangkauan item serang ini (selisih nomor petak sesuai jarak item). */
+  targetsInReach(item: ItemId): PlayerState[] {
+    const net = this.online;
+    if (!net || !this.state || !this.arena) return [];
+    const me = this.state.players.find((p) => p.id === net.myId);
+    if (!me) return [];
+    const r = itemRange(item);
+    return this.state.players.filter((p) => p.id !== me.id && p.id in this.arena!.bags && inReach(me.position, p.position, r.max, r.min));
+  }
+
+  useItem(item: ItemId, targetId?: string): void {
+    this.online?.send({ t: 'use_item', item, ...(targetId ? { targetId } : {}) });
+  }
+
+  private syncItems(): void {
+    const list: TileItem[] = [...(this.arena?.tileItems ?? [])];
+    for (const [tile, h] of this.heldItems) if (!list.some((c) => c.tile === tile)) list.push({ tile, item: h.item });
+    this.stage.setTileItems(list);
+  }
+
+  private collectItem(tile: number, playerId: string, item: ItemId): void {
+    this.heldItems.delete(tile);
+    this.stage.collectItem(tile);
+    const shield = item === 'shield';
+    this.stage.characters.get(playerId)?.showEmote(shield ? `🛡️+${SHIELD_PER_ITEM}` : `🎒${ITEMS[item].emoji}`, 1400);
+    if (shield) this.stage.shieldHit(playerId, false);
+    this.syncItems();
+    const name = this.state.players.find((p) => p.id === playerId)?.name ?? '?';
+    this.bus.emit('arena:pickup', { playerId, got: { tile, item } });
+    this.bus.emit('ui:log', {
+      text: shield ? t('arena.log.shield', { name, n: SHIELD_PER_ITEM }) : t('arena.log.pickup', { name, item: `${ITEMS[item].emoji} ${t(`item.${item}`)}` }),
+    });
+    this.bus.emit('arena:update', {});
+  }
+
+  /** Berhenti di petak ber-item tapi tas penuh: item tetap di papan (perisai tidak memakai slot). */
+  private bagFullAt(tile: number, playerId: string): void {
+    const here = this.arena?.tileItems.find((c) => c.tile === tile);
+    if (!this.arena || !here || here.item === 'shield') return;
+    if ((this.arena.bags[playerId]?.length ?? 0) < BAG_SIZE) return;
+    this.stage.characters.get(playerId)?.showEmote('🎒✖', 1400);
+    if (playerId === this.online?.myId) this.bus.emit('ui:banner', { text: t('arena.bagFull'), kind: 'bad' });
+  }
+
+  /** Kejadian arena tampil di papan 3D untuk semua anggota room (pemain lain & penonton). */
+  private onArenaEvent(ev: ArenaEvent): void {
+    const chars = this.stage.characters;
+    if (ev.kind === 'attack') {
+      if (ev.playerId === this.online?.myId) this.attackedTurn = this.state.turn;
+      // state langsung mengikuti server; animasinya menyusul
+      const koPlayer = ev.ko ? this.state.players.find((x) => x.id === ev.ko) : undefined;
+      if (koPlayer) koPlayer.position = KO_TILE;
+      this.playAttack(ev, this.token).catch(() => undefined); // dibatalkan bila game keluar
+    } else if (ev.kind === 'heal') {
+      chars.get(ev.playerId)?.showEmote(`❤️+${ev.amount}`, 1400);
+      this.stage.glow(ev.playerId, 0x69db7c);
+    }
+    this.bus.emit('arena:event', { ev });
+  }
+
+  /** Animasi serangan: penyerang meluncurkan item → (dipantulkan cermin) → kena: perisai menyerap / darah berkurang. */
+  private async playAttack(ev: Extract<ArenaEvent, { kind: 'attack' }>, token: number): Promise<void> {
+    const chars = this.stage.characters;
+    chars.get(ev.playerId)?.showEmote(ITEMS[ev.item].emoji, 1000);
+    if (chars.has(ev.playerId)) void this.stage.pulsePose(ev.playerId, 'cheer', 0.5);
+    this.bus.emit('arena:launch', { ev });
+    await this.stage.projectile(ev.playerId, ev.targetId, ev.item);
+    this.check(token);
+    if (ev.outcome === 'reflected') {
+      chars.get(ev.targetId)?.showEmote('🪞', 1200);
+      this.stage.glow(ev.targetId, 0xe599f7);
+      this.bus.emit('arena:reflect', { ev });
+      await this.stage.projectile(ev.targetId, ev.playerId, ev.item);
+      this.check(token);
+    }
+    const victim = ev.victimId;
+    if (ev.absorbed > 0) this.stage.shieldHit(victim, ev.shieldBroken);
+    if (ev.damage > 0) {
+      const fx = itemFx(ev.item);
+      const color = fx === 'zap' ? 0xfff3bf : ev.item === 'snowball' ? 0xa5d8ff : fx === 'flame' ? 0xff6b00 : fx === 'straight' ? 0xff4d6d : 0xff6b3d;
+      this.stage.blast(victim, color, itemHeavy(ev.item));
+      if (chars.has(victim)) void this.stage.pulsePose(victim, 'scared', 0.7);
+    }
+    const label = [ev.damage > 0 ? `💥−${ev.damage}` : '', ev.absorbed > 0 ? `🛡️−${ev.absorbed}` : ''].filter(Boolean).join(' ');
+    chars.get(victim)?.showEmote(ev.shieldBroken && !ev.damage ? '🛡️💔' : label, 1500);
+    this.bus.emit('arena:impact', { ev });
+    if (ev.ko) {
+      const name = this.state.players.find((p) => p.id === ev.ko)?.name ?? '?';
+      this.bus.emit('ui:banner', { text: t('arena.koBanner', { name }), kind: 'bad' });
+      await this.stage.sleep(0.5);
+      this.check(token);
+      await this.stage.sendTo(ev.ko, KO_TILE);
+      this.bus.emit('move:step', { playerId: ev.ko, tile: KO_TILE, stepIndex: 0, total: 0 });
+    }
   }
 
   /** Hasil duel: setelah layar hasil tampil, yang kalah melompat kembali ke Start. */
@@ -492,6 +639,11 @@ export class Game {
     }
     this.check(token);
     this.bus.emit('move:step', { playerId: id, tile: move.final, stepIndex: move.path.length, total: move.path.length });
+
+    // 4a) arena: item di petak tujuan masuk tas (atau tas penuh)
+    const held = this.heldItems.get(move.final);
+    if (held && held.playerId === id) this.collectItem(move.final, held.playerId, held.item);
+    else if (this.arena) this.bagFullAt(move.final, id);
 
     // 4b) duel (online): berhenti di petak yang ditempati pemain lain
     if (fight) {

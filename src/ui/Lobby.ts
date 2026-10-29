@@ -473,6 +473,8 @@ export class Lobby {
           ))),
           this.toggle(t('setup.sixAgain'), room.settings.options.sixRollsAgain, (v) => this.net.send({ t: 'settings', options: { sixRollsAgain: v } })),
           this.toggle(t('setup.exact'), room.settings.options.exactFinish, (v) => this.net.send({ t: 'settings', options: { exactFinish: v } })),
+          this.toggle(t('lobby.arena'), room.settings.arena, (v) => this.net.send({ t: 'settings', arena: v })),
+          h('small', { class: 'hint toggle-hint' }, t('lobby.arenaHint')),
           this.toggle(t('lobby.fight'), room.settings.fight, (v) => this.net.send({ t: 'settings', fight: v })),
           h('small', { class: 'hint toggle-hint' }, t('lobby.fightHint')),
         )
@@ -484,6 +486,7 @@ export class Lobby {
             h('span', { class: 'tag' }, t('setup.board') + ': ' + t(`board.${room.settings.boardPreset}`)),
             h('span', { class: 'tag' }, (room.settings.options.sixRollsAgain ? '✓ ' : '✗ ') + t('setup.sixAgain')),
             h('span', { class: 'tag' }, (room.settings.options.exactFinish ? '✓ ' : '✗ ') + t('setup.exact')),
+            h('span', { class: 'tag' }, (room.settings.arena ? '✓ 🪙 ' : '✗ 🪙 ') + t('lobby.arenaTag')),
             h('span', { class: 'tag' }, (room.settings.fight ? '✓ ⚔️ ' : '✗ ⚔️ ') + t('lobby.fightTag')),
           ),
         );

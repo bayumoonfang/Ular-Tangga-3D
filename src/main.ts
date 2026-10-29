@@ -227,7 +227,9 @@ async function boot(): Promise<void> {
   net.on('joined', () => {
     autoRejoin = false;
   });
-  net.on('error', ({ code }) => {
+  net.on('error', ({ code, message }) => {
+    // penolakan aksi di dalam permainan (mis. koin tidak cukup, lawan terlalu jauh) tampil sebagai toast
+    if (game.online && code !== 'rejoin_failed' && code !== 'room_closed' && code !== 'chat_rate') toast(message, 'bad');
     // sesi room lama sudah tidak ada (server restart / room bubar): kembali ke menu
     if (code === 'rejoin_failed') {
       autoRejoin = false;

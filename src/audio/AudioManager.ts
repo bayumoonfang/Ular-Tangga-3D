@@ -1,3 +1,4 @@
+import { itemFx, itemHeavy, type AttackFx } from '../core/Arena';
 import type { EventBus } from '../core/EventBus';
 import { CHARGE_PERFECT_FROM } from '../config';
 import { settings } from '../utils/settings';
@@ -35,6 +36,36 @@ export type SfxId =
   | 'fight_hit'
   | 'fight_miss'
   | 'fight_ko'
+  | 'pickup'
+  | 'shield_up'
+  | 'whoosh'
+  | 'fuse'
+  | 'twang'
+  | 'rocket'
+  | 'explode'
+  | 'punch'
+  | 'thwack'
+  | 'block'
+  | 'shatter'
+  | 'mirror'
+  | 'ouch'
+  | 'battle_cry'
+  | 'whistle_fall'
+  | 'whir'
+  | 'flame_roar'
+  | 'ignite'
+  | 'zap_charge'
+  | 'meteor_fall'
+  | 'pow'
+  | 'explode_big'
+  | 'clonk'
+  | 'sizzle'
+  | 'thunder'
+  | 'splat'
+  | 'crowd_ooh'
+  | 'sting'
+  | 'heal'
+  | 'spawn'
   // ekspresi (arg = pengali volume, 0 = penuh)
   | 'x_clap'
   | 'x_laugh'
@@ -790,6 +821,135 @@ export class AudioManager {
         this.tone(120, t, 0.5, 'sine', 0.6, o, 40, 0.05);
         this.crash(t + 0.05, o);
         break;
+      // ── arena ──
+      case 'pickup': // "ting-ting" item masuk tas
+        this.bell(hz(88), t, 0.35, 0.2, o);
+        this.bell(hz(95), t + 0.07, 0.5, 0.2, o);
+        this.noise(t, 0.08, 'highpass', 6000, 0.08, o);
+        break;
+      case 'shield_up': // perisai bertambah: dengung naik berkilau
+        this.tone(300, t, 0.4, 'triangle', 0.12, o, 900, 0.1);
+        [79, 86, 91].forEach((m, k) => this.bell(hz(m), t + 0.12 + k * 0.06, 0.5, 0.12, o));
+        break;
+      case 'whoosh': // ayunan tinju
+        this.noise(t, 0.18, 'bandpass', 900, 0.3, o, 2600, 1.2);
+        break;
+      case 'fuse': // sumbu bom mendesis + desing lemparan
+        this.noise(t, 0.5, 'highpass', 5000, 0.12, o, 7000);
+        this.tone(1100, t + 0.1, 0.6, 'sine', 0.06, o, 400, 0.05);
+        break;
+      case 'twang': // tali busur dilepas
+        this.pluck(hz(50), t, 0.35, 0.3, o, 'sawtooth', 1800);
+        this.noise(t + 0.02, 0.25, 'bandpass', 3000, 0.12, o, 6000, 2);
+        break;
+      case 'rocket': // roket meluncur: desis naik
+        this.noise(t, 0.9, 'bandpass', 600, 0.35, o, 3200, 0.8);
+        this.tone(140, t, 0.9, 'sawtooth', 0.08, o, 420, 0.05);
+        break;
+      case 'explode':
+        this.noise(t, 1.0, 'lowpass', 1600, 0.75, o, 80);
+        this.tone(95, t, 0.7, 'sine', 0.75, o, 30, 0.05);
+        this.crash(t + 0.02, o);
+        break;
+      case 'punch':
+        this.noise(t, 0.1, 'lowpass', 2200, 0.5, o, 400);
+        this.tone(140, t, 0.14, 'sine', 0.5, o, 60, 0.05);
+        break;
+      case 'thwack': // panah menancap
+        this.noise(t, 0.06, 'bandpass', 2000, 0.45, o, 700, 1.5);
+        this.tone(220, t, 0.12, 'square', 0.12, o, 110, 0);
+        break;
+      case 'shatter': // perisai pecah: kaca berhamburan
+        for (let i = 0; i < 10; i++) this.bell(hz(90 + Math.random() * 14), t + i * 0.025 + Math.random() * 0.02, 0.35, 0.07, o);
+        this.noise(t, 0.4, 'highpass', 6000, 0.3, o, 9000);
+        break;
+      case 'mirror': // dipantulkan cermin: "pling" berbalik
+        this.bell(hz(93), t, 0.4, 0.18, o);
+        this.tone(1600, t, 0.25, 'sine', 0.08, o, 700, 0.05);
+        break;
+      case 'ouch': // "aduh!" yang terkena
+        this.voice(t, 0.12, [420, 400], [750], [1250], 0.3 * (arg || 1), o);
+        this.voice(t + 0.13, 0.28, [460, 300], [400, 350], [900, 800], 0.3 * (arg || 1), o, 0.02);
+        break;
+      // ── serangan: lepas ──
+      case 'battle_cry': // "Hyaaa!" penyerang
+        this.noise(t, 0.06, 'bandpass', 2200, 0.1, o, undefined, 1);
+        this.voice(t + 0.04, 0.38, [330, 420, 390], [500, 780, 760], [1700, 1300, 1250], 0.26, o, 0.02);
+        break;
+      case 'whistle_fall': // desing benda jatuh, nada turun
+        this.tone(1500, t, Math.max(0.4, arg || 0.8), 'sine', 0.07, o, 380, 0.1);
+        this.tone(1520, t, Math.max(0.4, arg || 0.8), 'sine', 0.035, o, 395, 0.1);
+        break;
+      case 'whir': // bumerang berputar: desir naik-turun berulang
+        for (let i = 0; i < 9; i++) this.noise(t + i * 0.07, 0.06, 'bandpass', 1200 + (i % 2) * 900, 0.16, o, 2400, 2);
+        break;
+      case 'flame_roar': // semburan api
+        this.noise(t, 0.7, 'lowpass', 900, 0.45, o, 2200, 0.7);
+        this.noise(t + 0.05, 0.6, 'bandpass', 3000, 0.12, o, 1500, 1);
+        for (let i = 0; i < 8; i++) this.noise(t + Math.random() * 0.6, 0.02, 'highpass', 5000, 0.15, o);
+        break;
+      case 'ignite': // roket dinyalakan: dentum kecil
+        this.noise(t, 0.25, 'lowpass', 1200, 0.5, o, 200);
+        this.tone(70, t, 0.3, 'sine', 0.45, o, 40, 0.05);
+        break;
+      case 'zap_charge': // listrik mengumpul sebelum petir
+        for (let i = 0; i < 12; i++) this.noise(t + i * 0.022, 0.018, 'highpass', 6000 + Math.random() * 3000, 0.16, o);
+        this.tone(200, t, 0.3, 'sawtooth', 0.06, o, 1600, 0.05);
+        break;
+      case 'meteor_fall': // meteor menukik: gemuruh rendah + desis
+        this.noise(t, 0.9, 'lowpass', 300, 0.5, o, 1500, 0.8);
+        this.tone(900, t, 0.9, 'sawtooth', 0.04, o, 120, 0.05);
+        break;
+      // ── serangan: kena ──
+      case 'pow': // pukulan telak: retak + dentum + tamparan
+        this.noise(t, 0.04, 'highpass', 3000, 0.55, o);
+        this.noise(t, 0.16, 'lowpass', 1800, 0.65, o, 250);
+        this.tone(160, t, 0.22, 'sine', 0.7, o, 45, 0.05);
+        this.tone(900, t, 0.05, 'square', 0.1, o, 300, 0);
+        break;
+      case 'explode_big': // ledakan besar: sub-bass, gemuruh, serpihan
+        this.noise(t, 1.4, 'lowpass', 2200, 0.85, o, 60);
+        this.tone(80, t, 1.0, 'sine', 0.9, o, 25, 0.05);
+        this.tone(160, t, 0.25, 'square', 0.12, o, 50, 0);
+        this.crash(t + 0.02, o);
+        for (let i = 0; i < 14; i++) this.noise(t + 0.25 + Math.random() * 0.9, 0.025, 'bandpass', 2500 + Math.random() * 3000, 0.12, o, undefined, 2);
+        break;
+      case 'clonk': // bumerang mengenai: kayu
+        this.tone(420, t, 0.12, 'triangle', 0.4, o, 250, 0.05);
+        this.noise(t, 0.05, 'bandpass', 1500, 0.3, o, undefined, 3);
+        break;
+      case 'sizzle': // terbakar: fwoosh + desis
+        this.noise(t, 0.35, 'lowpass', 2500, 0.5, o, 500);
+        this.noise(t + 0.1, 0.7, 'highpass', 4500, 0.18, o, 8000);
+        break;
+      case 'thunder': // petir: retak tajam + gemuruh panjang
+        this.noise(t, 0.08, 'highpass', 2500, 0.8, o);
+        this.noise(t + 0.03, 1.6, 'lowpass', 900, 0.6, o, 80, 0.8);
+        this.tone(60, t + 0.05, 1.2, 'sine', 0.5, o, 30, 0.05);
+        break;
+      case 'splat': // bola salju pecah
+        this.noise(t, 0.18, 'lowpass', 1400, 0.45, o, 300);
+        [96, 100, 103].forEach((m, k) => this.bell(hz(m), t + 0.03 + k * 0.03, 0.4, 0.06, o));
+        break;
+      case 'crowd_ooh': // penonton "Ooooh!"
+        [150, 175, 205].forEach((f0, k) => this.voice(t + k * 0.03, 0.8, [f0, f0 * 1.1, f0 * 0.95], [380, 420], [800, 760], 0.12, o, 0.01));
+        this.noise(t, 0.8, 'bandpass', 900, 0.06, o, 600, 0.6);
+        break;
+      case 'sting': // stab dramatis (serangan berat / K.O.)
+        [48, 55, 60, 63].forEach((m) => this.brass(hz(m), t, 0.55, 0.07, o, false));
+        this.crash(t, o);
+        break;
+      case 'block': // denting logam
+        this.bell(hz(79), t, 0.6, 0.18, o);
+        this.tone(1800, t, 0.12, 'square', 0.05, o, 1200, 0);
+        this.noise(t, 0.06, 'highpass', 5000, 0.12, o);
+        break;
+      case 'heal':
+        [76, 81, 86, 93].forEach((m, k) => this.bell(hz(m), t + k * 0.07, 0.6, 0.12, o));
+        break;
+      case 'spawn': // item baru muncul di papan
+        for (let i = 0; i < 5; i++) this.bell(hz(84 + i * 3), t + i * 0.05, 0.25, 0.08, o);
+        break;
       default:
         this.playExpressionSfx(id, t, arg || 1);
     }
@@ -1043,6 +1203,54 @@ export class AudioManager {
       this.playSfx(`x_${id}`, spectator ? 0.55 : 1);
     });
     bus.on('bonus:six', () => this.playSfx('bonus'));
+    bus.on('arena:pickup', ({ got }) => this.playSfx(got.item === 'shield' ? 'shield_up' : 'pickup'));
+    bus.on('arena:event', ({ ev }) => {
+      if (ev.kind === 'heal') this.playSfx('heal');
+      else if (ev.kind === 'spawn') this.playSfx('spawn');
+    });
+    // suara serangan sesuai gayanya (AttackFx): saat dilepas & saat mengenai sasaran
+    const LAUNCH: Record<AttackFx, [SfxId, number][]> = {
+      melee: [['whoosh', 0], ['whoosh', 0.06]],
+      lob: [['fuse', 0], ['whistle_fall', 0.15]],
+      straight: [['twang', 0]],
+      spin: [['whir', 0]],
+      flame: [['flame_roar', 0]],
+      rocket: [['ignite', 0], ['rocket', 0.05]],
+      zap: [['zap_charge', 0]],
+      meteor: [['meteor_fall', 0]],
+    };
+    const IMPACT: Record<AttackFx, SfxId[]> = {
+      melee: ['pow'],
+      lob: ['explode_big'],
+      straight: ['thwack', 'pow'],
+      spin: ['clonk', 'pow'],
+      flame: ['sizzle'],
+      rocket: ['explode_big'],
+      zap: ['thunder'],
+      meteor: ['explode_big', 'thunder'],
+    };
+    bus.on('arena:launch', ({ ev }) => {
+      this.playSfx('battle_cry');
+      for (const [id, d] of LAUNCH[itemFx(ev.item)]) this.playSfx(id, 0, d);
+    });
+    bus.on('arena:reflect', () => this.playSfx('mirror'));
+    bus.on('arena:impact', ({ ev }) => {
+      if (ev.absorbed > 0) this.playSfx('block');
+      if (ev.shieldBroken) this.playSfx('shatter', 0, 0.05);
+      if (ev.damage > 0) {
+        const impact = ev.item === 'snowball' ? (['splat'] as SfxId[]) : IMPACT[itemFx(ev.item)];
+        impact.forEach((id, k) => this.playSfx(id, 0, k * 0.04));
+        this.playSfx('ouch', 1, 0.14);
+        if (itemHeavy(ev.item)) {
+          this.playSfx('sting', 0, 0.05);
+          this.playSfx('crowd_ooh', 0, 0.3);
+        }
+      }
+      if (ev.ko) {
+        this.playSfx('womp', 0, 0.5);
+        this.playSfx('crowd_ooh', 0, 0.45);
+      }
+    });
     bus.on('game:win', () => {
       this.playMusic('victory');
       this.playSfx('fanfare');

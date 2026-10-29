@@ -1,4 +1,5 @@
 import type { BoardPresetId } from '../config';
+import type { ArenaEvent, ArenaInfo, TileItem } from '../core/Arena';
 import type { GameState } from '../core/GameState';
 import type { RuleOptions } from '../core/Rules';
 
@@ -68,6 +69,8 @@ export interface RoomSettings {
   options: RuleOptions;
   /** pemain yang berhenti di petak yang sama bertarung (duel panah ala Ayo Dance); kalah = kembali ke Start */
   fight: boolean;
+  /** Mode Arena: darah (HP) + item serang/bertahan/pulih acak di papan (tas 3 slot) */
+  arena: boolean;
 }
 
 // ───────────────────────── Duel (fight) ─────────────────────────
@@ -177,7 +180,7 @@ export type ClientMsg =
   | { t: 'chat'; text: string }
   | { t: 'set_character'; character: string }
   | { t: 'ready'; ready: boolean }
-  | { t: 'settings'; boardPreset?: BoardPresetId; options?: Partial<RuleOptions>; fight?: boolean } // host saja
+  | { t: 'settings'; boardPreset?: BoardPresetId; options?: Partial<RuleOptions>; fight?: boolean; arena?: boolean } // host saja
   | { t: 'start_game' } // host saja
   | { t: 'charge_start' }
   | { t: 'roll' }
@@ -185,6 +188,7 @@ export type ClientMsg =
   | { t: 'sync' } // minta snapshot terbaru (mis. setelah tab lama di latar belakang)
   | { t: 'back_to_lobby' }
   | { t: 'kick'; playerId: string } // host saja
+  | { t: 'use_item'; item: string; targetId?: string } // arena: serang lawan di petak sebelah / pulihkan darah
   | { t: 'fight_input'; id: number; round: number; grade: Grade }
   | { t: 'fight_progress'; id: number; round: number; typed: number; wrong?: boolean } // ketikan panah, disiarkan live
   | { t: 'leave' };
@@ -209,7 +213,11 @@ export type ServerMsg =
       after: TurnSnapshot;
       /** pion berhenti di petak yang ditempati pemain lain: duel menyusul setelah animasi */
       fight?: boolean;
+      /** arena: item yang diambil di petak tujuan (masuk tas saat pion tiba) */
+      pickup?: TileItem;
     }
+  | { t: 'arena'; arena: ArenaInfo }
+  | { t: 'arena_event'; ev: ArenaEvent }
   | { t: 'fight_start'; fight: FightInfo }
   | {
       t: 'fight_hit';

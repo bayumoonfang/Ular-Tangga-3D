@@ -1,10 +1,12 @@
 import { CHARACTERS, CHARGE_FILL_SECONDS, CHARGE_OVERHEAT_GRACE, CHARGE_PERFECT_FROM, TILE_COUNT } from '../config';
+import { ARENA_HP, BAG_SIZE, ITEMS, SHIELD_MAX, itemHeavy, itemPierces, itemRange, type ItemId } from '../core/Arena';
 import type { Game } from '../core/Game';
 import { onLangChange, t } from '../i18n';
 import { EXPRESSIONS, expressionEmoji, type ExpressionId } from '../network/protocol';
 import { settings } from '../utils/settings';
 import { h, setVisible } from './dom';
 import { icon } from './icons';
+import { toast } from './toast';
 
 interface Card {
   el: HTMLElement;
@@ -12,6 +14,8 @@ interface Card {
   bar: HTMLElement;
   bubble: HTMLElement;
   bubbleTimer: number;
+  /** arena: koin, darah, perisai */
+  arena: HTMLElement;
 }
 
 /** jeda minimal antar ekspresi dari perangkat ini (server juga membatasi) */
@@ -35,6 +39,16 @@ export class HUD {
   private livePill = h('div', { class: 'live-pill hidden' });
   /** online: menunggu pemain pengganti / slot kosong yang bisa diisi */
   private notice = h('div', { class: 'hud-notice hidden' });
+  /** Mode Arena: tas item 3 slot (kanan tengah) + pemilih target serangan */
+  private arenaDock = h('div', { class: 'arena-dock hidden' });
+  private respawnEl = h('small', { class: 'arena-respawn' });
+  private targetPop = h('div', { class: 'target-pop hidden', role: 'menu' });
+  /** kilat merah layar saat perangkat ini terkena serangan */
+  private hitFlash = h('div', { class: 'hit-flash', 'aria-hidden': 'true' });
+  /** slot tas yang sedang dibidikkan (item serang) */
+  private aimSlot: number | null = null;
+  /** waktu (Date.now) item-item yang sudah diambil muncul kembali */
+  private respawnAt: number[] = [];
   private chargeFill = h('i');
   private charge = h(
     'div',
@@ -63,6 +77,8 @@ export class HUD {
     private cb: { onPause(): void; onResetCamera(): void },
   ) {
     this.speedBtn.append(icon('fast'));
+    // tas arena di kolom kanan, tepat di atas tombol ekspresi (panel ekspresi terbuka di atasnya)
+    this.exprDock.insertBefore(this.arenaDock, this.exprToggle);
     const controls = h('div', { class: 'hud-controls' }, this.speedBtn, this.cameraBtn, this.soundBtn, this.pauseBtn);
     this.el.append(
       this.players,
@@ -73,6 +89,7 @@ export class HUD {
       this.dicePop,
       this.log,
       this.exprDock,
+      this.hitFlash,
       h('div', { class: 'hud-bottom' }, this.timer, this.charge, this.rollBtn, this.hint),
     );
     // klik di luar panel ekspresi menutupnya
@@ -133,6 +150,34 @@ export class HUD {
     bus.on('ui:banner', ({ text, kind }) => this.showBanner(text, kind));
     bus.on('ui:log', ({ text }) => this.addLog(text));
 
+    // arena
+    bus.on('arena:update', () => {
+      const now = Date.now();
+      this.respawnAt = (game.arena?.respawnIn ?? []).map((ms) => now + ms);
+      this.renderArena();
+    });
+    bus.on('arena:event', () => this.renderArena());
+    bus.on('arena:impact', ({ ev }) => {
+      const me = game.online?.myId;
+      const heavy = itemHeavy(ev.item);
+      if (ev.victimId === me) {
+        this.restartAnim(this.hitFlash, ev.damage > 0 ? 'show' : 'shield');
+        if (ev.damage > 0) this.showBanner(t('arena.youHit', { n: ev.damage }), 'bad');
+        else this.showBanner(t('arena.youBlocked', { n: ev.absorbed }), 'info');
+      }
+      if (ev.victimId === me || (heavy && ev.damage > 0)) this.shakeScreen(ev.victimId === me && heavy ? 'big' : 'small');
+      this.renderArena();
+    });
+    for (const ev of ['turn:start', 'move:step', 'fight:end'] as const) bus.on(ev, () => this.renderArena());
+    bus.on('phase', () => {
+      if (game.machine.phase !== 'AWAIT_ROLL') this.aim(null);
+      // fase berganti sebelum tombol lempar siap (human.waiting) — render setelahnya
+      queueMicrotask(() => this.renderArena());
+    });
+    document.addEventListener('pointerdown', (e) => {
+      if (this.aimSlot !== null && !this.arenaDock.contains(e.target as Node)) this.aim(null);
+    });
+
     // penghitung mundur giliran (online)
     window.setInterval(() => this.tickTimer(), 400);
 
@@ -141,6 +186,8 @@ export class HUD {
       if (e.code === 'Space' || e.code === 'Enter') {
         e.preventDefault();
         if (!e.repeat) this.beginCharge();
+      } else if (e.code === 'Escape' && this.aimSlot !== null) {
+        this.aim(null);
       } else if (e.code === 'Escape' || e.code === 'KeyP') {
         this.cb.onPause();
       } else if (/^Digit[1-8]$/.test(e.code) && !e.repeat && !e.ctrlKey && !e.metaKey && !e.altKey) {
@@ -245,23 +292,186 @@ export class HUD {
       const bar = h('i', { style: { background: hex(p.color) } });
       const tag = p.isBot ? t('hud.bot') : online && this.game.isMine(p.id) ? t('hud.you') : null;
       const bubble = h('span', { class: 'pcard-bubble', 'aria-hidden': 'true' });
+      const arena = h('div', { class: 'parena hidden' });
       const el = h(
         'div',
         { class: 'pcard', style: { '--c': hex(p.color) } },
         h('span', { class: 'pemoji' }, emoji),
-        h('div', { class: 'pinfo' }, h('b', null, h('span', { class: 'pname' }, p.name), tag ? h('em', null, tag) : null), info, h('div', { class: 'bar' }, bar)),
+        h('div', { class: 'pinfo' }, h('b', null, h('span', { class: 'pname' }, p.name), tag ? h('em', null, tag) : null), info, h('div', { class: 'bar' }, bar), arena),
         bubble,
       );
       this.players.append(el);
-      this.cards.set(p.id, { el, info, bar, bubble, bubbleTimer: 0 });
+      this.cards.set(p.id, { el, info, bar, bubble, bubbleTimer: 0, arena });
     }
     if (online && this.game.online?.room) {
       for (const p of this.game.online.room.players) this.cards.get(p.id)?.el.classList.toggle('offline', !p.connected);
     }
     this.visible = true;
     setVisible(this.el, true);
+    this.aim(null);
     this.refresh();
     this.updateRoll();
+    this.renderArena();
+  }
+
+  // ───────────────────────── Arena ─────────────────────────
+
+  /** Kartu pemain (darah, perisai, isi tas) + dock tas item 3 slot untuk pemain di Mode Arena. */
+  private renderArena(): void {
+    const g = this.game;
+    const on = !!g.arena && !!g.state;
+    this.el.classList.toggle('arena', on);
+    for (const [id, card] of this.cards) {
+      setVisible(card.arena, on);
+      if (!on) continue;
+      const hp = g.arenaHp(id);
+      const sh = g.arenaShield(id);
+      const bag = g.arenaBag(id);
+      card.arena.replaceChildren(
+        h(
+          'span',
+          { class: 'pmeters', title: `${t('arena.hp')} ${hp}/${ARENA_HP} · ${t('arena.shield')} ${sh}/${SHIELD_MAX}` },
+          h('span', { class: `php ${hp <= ARENA_HP * 0.3 ? 'low' : ''}` }, h('i', { style: { width: `${(hp / ARENA_HP) * 100}%` } })),
+          h('span', { class: `pshield ${sh > 0 ? '' : 'none'}` }, h('i', { style: { width: `${(sh / SHIELD_MAX) * 100}%` } })),
+        ),
+        h('small', { class: 'php-num' }, `❤️${hp}`, sh > 0 ? ` 🛡️${sh}` : ''),
+        h(
+          'span',
+          { class: 'pbag', title: t('arena.bag') },
+          ...Array.from({ length: BAG_SIZE }, (_, i) => h('i', { class: bag[i] ? 'full' : '' }, bag[i] ? ITEMS[bag[i]].emoji : '')),
+        ),
+      );
+    }
+    const mine = on && g.arenaPlayer;
+    setVisible(this.arenaDock, mine);
+    if (!mine) return;
+    const me = g.online!.myId;
+    const bag = g.arenaBag(me);
+    if (this.aimSlot !== null && !bag[this.aimSlot]) this.aimSlot = null;
+    const canAttack = g.canAttack();
+    const hp = g.arenaHp(me);
+    const sh = g.arenaShield(me);
+    const slot = (i: number) => {
+      const id = bag[i];
+      if (!id) return h('div', { class: 'item-btn slot-empty', title: t('arena.slotEmpty') }, h('span', { class: 'item-emoji' }, '＋'));
+      const def = ITEMS[id];
+      const attack = def.kind === 'attack';
+      const inRange = attack && canAttack && g.targetsInReach(id).length > 0;
+      const disabled = def.kind === 'guard' || (attack ? !canAttack : hp >= ARENA_HP);
+      const title = `${def.emoji} ${t(`item.${id}`)} — ${itemDesc(id)}${attack && canAttack && !inRange ? ` · ${t('arena.noneInRange')}` : ''}`;
+      return h(
+        'button',
+        {
+          class: `item-btn kind-${def.kind} ${this.aimSlot === i ? 'active' : ''} ${attack && canAttack && !inRange ? 'out' : ''} ${inRange ? 'ready' : ''}`,
+          'data-slot': i,
+          disabled,
+          title,
+          'aria-label': title,
+          onclick: () => this.onSlot(i),
+        },
+        h('span', { class: 'item-emoji' }, def.emoji),
+        h('small', { class: 'item-name' }, attack ? rangeLabel(id) : t(`item.${id}`)),
+      );
+    };
+    const attacks = bag.filter((id) => ITEMS[id].kind === 'attack');
+    this.arenaDock.title = attacks.length && !canAttack ? t('arena.attackTurn') : '';
+    this.arenaDock.classList.toggle('my-turn', canAttack);
+    this.arenaDock.replaceChildren(
+      h(
+        'div',
+        { class: 'arena-head' },
+        h('b', null, '🎒 ', `${bag.length}/${BAG_SIZE}`),
+        h('span', { class: `arena-shield ${sh > 0 ? '' : 'none'}`, title: `${t('arena.shield')} ${sh}/${SHIELD_MAX}` }, '🛡️', String(sh)),
+        this.respawnEl,
+      ),
+      h('div', { class: 'arena-items' }, ...Array.from({ length: BAG_SIZE }, (_, i) => slot(i))),
+      this.targetPop,
+    );
+    this.renderTargets();
+    this.tickRespawn();
+  }
+
+  private onSlot(i: number): void {
+    const id = this.game.arenaBag(this.game.online?.myId ?? '')[i];
+    if (!id) return;
+    const def = ITEMS[id];
+    if (def.kind === 'heal') {
+      this.game.useItem(id);
+      return;
+    }
+    if (def.kind !== 'attack' || !this.game.canAttack()) return;
+    if (!this.game.targetsInReach(id).length) {
+      toast(t('arena.outOfRange', { item: `${def.emoji} ${t(`item.${id}`)}`, r: rangeText(id) }), 'bad');
+      return;
+    }
+    this.aim(this.aimSlot === i ? null : i);
+  }
+
+  /** Mode membidik: daftar lawan dalam jangkauan untuk item serang di slot yang dipilih. */
+  private aim(slot: number | null): void {
+    this.aimSlot = slot;
+    this.renderTargets();
+    this.arenaDock.querySelectorAll<HTMLElement>('.item-btn').forEach((b) => b.classList.toggle('active', slot !== null && b.dataset.slot === String(slot)));
+  }
+
+  private renderTargets(): void {
+    const slot = this.aimSlot;
+    const id = slot === null ? undefined : this.game.arenaBag(this.game.online?.myId ?? '')[slot];
+    if (!id || !this.game.canAttack()) {
+      setVisible(this.targetPop, false);
+      this.aimSlot = null;
+      return;
+    }
+    const def = ITEMS[id];
+    const targets = this.game.targetsInReach(id);
+    const myTile = this.game.state.players.find((p) => p.id === this.game.online?.myId)?.position ?? 0;
+    this.targetPop.replaceChildren(
+      h('span', { class: 'target-title' }, def.emoji, ' ', t('arena.pickTarget', { item: t(`item.${id}`) }), h('small', null, ` (${rangeText(id)})`)),
+      ...targets.map((p) => {
+        const emoji = CHARACTERS.find((c) => c.id === p.character)?.emoji ?? '🎲';
+        const sh = this.game.arenaShield(p.id);
+        return h(
+          'button',
+          {
+            class: 'target-btn',
+            role: 'menuitem',
+            style: { '--c': hex(p.color) },
+            onclick: () => {
+              this.game.useItem(id, p.id);
+              this.aim(null);
+            },
+          },
+          h('span', null, emoji),
+          h('b', null, p.name),
+          h('small', null, `❤️${this.game.arenaHp(p.id)}${sh > 0 ? ` 🛡️${sh}` : ''} · ${t('arena.distance', { n: Math.abs(p.position - myTile) })}`),
+        );
+      }),
+    );
+    setVisible(this.targetPop, true);
+  }
+
+  private shakeScreen(size: 'big' | 'small'): void {
+    const canvas = document.getElementById('scene');
+    if (!canvas || settings.get('reducedMotion')) return;
+    canvas.classList.remove('shake-big', 'shake-small');
+    void canvas.offsetWidth;
+    canvas.classList.add(`shake-${size}`);
+  }
+
+  private restartAnim(el: HTMLElement, cls: string): void {
+    el.classList.remove('show', 'shield');
+    void el.offsetWidth;
+    el.classList.add(cls);
+  }
+
+  /** Hitung mundur item berikutnya muncul di papan (yang paling cepat). */
+  private tickRespawn(): void {
+    if (!this.game.arena) return;
+    const now = Date.now();
+    const next = this.respawnAt.filter((at) => at > now).sort((a, b) => a - b)[0];
+    this.respawnEl.textContent = next ? `✨${Math.ceil((next - now) / 1000)}s` : '';
+    this.respawnEl.title = next ? t('arena.nextItem', { n: Math.ceil((next - now) / 1000) }) : '';
+    setVisible(this.respawnEl, !!next);
   }
 
   // ───────────────────────── Ekspresi ─────────────────────────
@@ -376,6 +586,7 @@ export class HUD {
   /** Sisa waktu giliran (hanya online, saat menunggu lemparan). */
   private tickTimer(): void {
     const g = this.game;
+    this.tickRespawn();
     const show =
       !!g.online && this.visible && !!this.deadline && g.machine.phase === 'AWAIT_ROLL' && this.deadline.playerId === this.activeId && !g.rollBlocked;
     setVisible(this.timer, show);
@@ -410,6 +621,24 @@ export class HUD {
     while (this.log.childElementCount > 3) this.log.firstElementChild?.remove();
     window.setTimeout(() => line.remove(), 6000);
   }
+}
+
+/** Jarak serang item, mis. "1", "≤3", "2–12". */
+function rangeText(id: ItemId): string {
+  const r = itemRange(id);
+  return r.min > 1 ? `${r.min}–${r.max}` : r.max === 1 ? '1' : `1–${r.max}`;
+}
+
+function rangeLabel(id: ItemId): string {
+  return `↔ ${rangeText(id)}`;
+}
+
+/** Keterangan item: serang = damage · jarak (· tembus perisai); lainnya dari teks item. */
+function itemDesc(id: ItemId): string {
+  const def = ITEMS[id];
+  if (def.kind !== 'attack') return `${t(`item.${id}.desc`)}${def.kind === 'guard' ? ` (${t('arena.guardAutoShort')})` : ''}`;
+  const base = t('arena.descAttack', { d: def.damage, r: rangeText(id) });
+  return itemPierces(id) ? `${base} · ${t('arena.pierce')}` : base;
 }
 
 /** Sedang mengetik di input (mis. chat): pintasan keyboard permainan diabaikan. */

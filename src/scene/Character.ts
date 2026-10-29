@@ -317,7 +317,7 @@ export class Character {
     }
   }
 
-  private faceYaw(angle: number, duration = 0.14): void {
+  faceYaw(angle: number, duration = 0.14): void {
     const cur = this.root.rotation.y;
     const delta = Math.atan2(Math.sin(angle - cur), Math.cos(angle - cur));
     gsap.to(this.root.rotation, { y: cur + delta, duration, ease: 'power2.out' });

@@ -37,6 +37,8 @@ import {
   type TurnSnapshot,
 } from '../src/network/protocol';
 import { createRng, randomSeed, type Rng } from '../src/utils/random';
+import { RoomArena } from './Arena';
+import { RoomError } from './RoomError';
 
 /** toleransi latensi jaringan saat menilai lemparan sempurna (detik) */
 const LATENCY_SLACK = 0.3;
@@ -97,14 +99,7 @@ type Member = ServerPlayer | ServerSpectator;
 
 type Send = (socketId: string, msg: ServerMsg) => void;
 
-export class RoomError extends Error {
-  constructor(
-    message: string,
-    readonly code?: string,
-  ) {
-    super(message);
-  }
-}
+export { RoomError };
 
 /** Satu room: lobby, lalu permainan yang dijalankan server (server authoritative). */
 export class Room {
@@ -112,7 +107,7 @@ export class Room {
   hostId = '';
   readonly players: ServerPlayer[] = [];
   readonly spectators: ServerSpectator[] = [];
-  settings: RoomSettings = { boardPreset: 'normal', options: { ...DEFAULT_OPTIONS }, fight: false };
+  settings: RoomSettings = { boardPreset: 'normal', options: { ...DEFAULT_OPTIONS }, fight: false, arena: true };
 
   private state: GameState | null = null;
   private rng: Rng = createRng(1);
@@ -137,6 +132,10 @@ export class Room {
   private fightSeq = 0;
   /** lemparan yang masuk selagi duel berlangsung, dijalankan setelah duel selesai */
   private queuedRoll: { id: string; boost: boolean } | null = null;
+  /** Mode Arena (darah & item di papan) — null bila dimatikan host */
+  private arena: RoomArena | null = null;
+  /** pemain yang mendapat giliran baru boleh menyerang setelah animasi sebelumnya selesai */
+  private actFrom = 0;
 
   constructor(
     readonly code: string,
@@ -237,6 +236,7 @@ export class Room {
     if (midGame) {
       this.openSlots--;
       this.state!.players.push({ id: p.id, name: p.name, character: p.character, color: PLAYER_COLORS[p.slot], isBot: false, position: 0 });
+      this.arena?.addPlayer(p.id);
     }
     return p;
   }
@@ -319,7 +319,7 @@ export class Room {
     this.broadcastRoom();
   }
 
-  updateSettings(id: string, boardPreset?: BoardPresetId, options?: Partial<RuleOptions>, fight?: boolean): void {
+  updateSettings(id: string, boardPreset?: BoardPresetId, options?: Partial<RuleOptions>, fight?: boolean, arena?: boolean): void {
     if (id !== this.hostId) throw new RoomError('Hanya host yang boleh mengubah pengaturan.');
     if (this.phase !== 'lobby') return;
     if (boardPreset && (['easy', 'normal', 'chaos', 'random'] as string[]).includes(boardPreset)) {
@@ -330,6 +330,7 @@ export class Room {
       if (typeof options.exactFinish === 'boolean') this.settings.options.exactFinish = options.exactFinish;
     }
     if (typeof fight === 'boolean') this.settings.fight = fight;
+    if (typeof arena === 'boolean') this.settings.arena = arena;
     for (const p of this.players) if (p.id !== this.hostId) p.ready = false;
     this.broadcastRoom();
   }
@@ -388,6 +389,7 @@ export class Room {
     if (s.current >= s.players.length) s.current = 0;
     if (wasCurrent) s.consecutiveSixes = 0;
     this.openSlots++;
+    this.arena?.removePlayer(id);
     if (this.fightPending) this.fightPending.fighters = this.fightPending.fighters.filter((f) => f !== id);
     if (this.fight && this.fight.info.fighters.includes(id)) {
       const info = this.fight.info;
@@ -474,6 +476,7 @@ export class Room {
   resync(p: Member): void {
     if ((this.phase === 'playing' || this.phase === 'finished') && this.state) {
       this.to(p, { t: 'game_snapshot', state: this.state, seq: this.seq });
+      if (this.arena) this.to(p, { t: 'arena', arena: this.arena.info() });
       if (this.phase !== 'playing') return;
       if (this.fight) {
         this.to(p, { t: 'fight_start', fight: { ...this.fight.info, startsIn: this.fight.startAt - Date.now() } });
@@ -530,6 +533,13 @@ export class Room {
     this.clearFight();
     this.chargeStart.clear();
     this.broadcast({ t: 'game_start', state: this.state, seq: this.seq });
+    this.arena?.stop();
+    this.arena = null;
+    if (this.settings.arena) {
+      this.arena = this.createArena();
+      this.arena.start(this.state.players.map((p) => p.id));
+      this.arena.broadcastInfo();
+    }
     this.broadcastRoom();
     this.scheduleTurn(ms(2500)); // waktu intro kamera di sisi client
   }
@@ -605,10 +615,23 @@ export class Room {
         ? next.players.filter((p) => p.id !== id && p.position === tile && this.player(p.id)).map((p) => p.id)
         : [];
     const fight = rivals.length > 0;
-    this.broadcast({ t: 'turn_result', seq: this.seq, playerId: id, value, boost, after, ...(fight ? { fight } : {}) });
+    // arena: item di petak tujuan masuk tas (tampil di client saat pion tiba)
+    const pickup = this.arena && !outcome.forfeited && !next.winnerId ? this.arena.pickup(id, tile) : null;
+    this.broadcast({
+      t: 'turn_result',
+      seq: this.seq,
+      playerId: id,
+      value,
+      boost,
+      after,
+      ...(fight ? { fight } : {}),
+      ...(pickup ? { pickup } : {}),
+    });
+    if (pickup) this.arena!.broadcastInfo();
 
     if (next.winnerId) {
       this.phase = 'finished';
+      this.arena?.stop();
       this.broadcastRoom();
       return;
     }
@@ -624,6 +647,39 @@ export class Room {
     }
     this.canRollAt = Date.now() + anim * 0.6;
     this.scheduleTurn(anim);
+  }
+
+  // ───────────────────────── Arena ─────────────────────────
+
+  private createArena(): RoomArena {
+    return new RoomArena({
+      state: () => this.state,
+      broadcast: (msg) => this.broadcast(msg),
+      system: (text) => this.system(text),
+      name: (pid) => this.player(pid)?.name ?? this.state?.players.find((p) => p.id === pid)?.name ?? '?',
+      ms,
+      canAct: (pid) => this.canAct(pid),
+    });
+  }
+
+  /** Giliran pemain ini, belum melempar, tidak ada duel / animasi yang masih berjalan. */
+  private canAct(id: string): boolean {
+    const s = this.state;
+    return (
+      this.phase === 'playing' &&
+      !!s &&
+      !this.waiting &&
+      s.players[s.current]?.id === id &&
+      !this.rollTimer &&
+      !this.fight &&
+      !this.fightPending &&
+      Date.now() >= this.actFrom - ms(300)
+    );
+  }
+
+  useItem(id: string, item: string, targetId?: string): void {
+    if (this.phase !== 'playing' || !this.arena) throw new RoomError('Item hanya bisa dipakai di Mode Arena saat bermain.');
+    this.arena.use(id, item, targetId);
   }
 
   // ───────────────────────── Duel ─────────────────────────
@@ -776,6 +832,7 @@ export class Room {
     if (!s || this.phase !== 'playing') return;
     this.stopTurn();
     if (this.waiting) return;
+    this.actFrom = Date.now() + animMs;
     const cur = s.players[s.current];
     const p = this.player(cur.id);
     const gone = !p || (p.disconnectedAt !== null && Date.now() - p.disconnectedAt > ms(RECONNECT_GRACE_MS));
@@ -848,6 +905,8 @@ export class Room {
       this.state = null;
       this.stopTurn();
       this.clearFight();
+      this.arena?.stop();
+      this.arena = null;
       this.openSlots = 0;
       for (const p of this.players) p.ready = false;
       this.broadcastRoom();
@@ -864,6 +923,7 @@ export class Room {
   destroy(): void {
     this.stopTurn();
     this.clearFight();
+    this.arena?.stop();
     this.cancelEmptyTimer();
     this.graceTimers.forEach((t) => clearTimeout(t));
     this.graceTimers.clear();

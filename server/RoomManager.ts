@@ -9,7 +9,8 @@ import {
   type Role,
   type ServerMsg,
 } from '../src/network/protocol';
-import { Room, RoomError } from './Room';
+import { Room } from './Room';
+import { RoomError } from './RoomError';
 
 interface Binding {
   room: Room;
@@ -19,7 +20,7 @@ interface Binding {
 }
 
 /** pesan yang hanya boleh dikirim pemain (penonton cuma menonton, chat & berekspresi) */
-const PLAYER_ONLY = new Set<ClientMsg['t']>(['set_character', 'ready', 'settings', 'start_game', 'charge_start', 'roll', 'back_to_lobby', 'kick', 'fight_input', 'fight_progress']);
+const PLAYER_ONLY = new Set<ClientMsg['t']>(['set_character', 'ready', 'settings', 'start_game', 'charge_start', 'roll', 'back_to_lobby', 'kick', 'fight_input', 'fight_progress', 'use_item']);
 
 /** Menghubungkan socket ke room/pemain dan meneruskan pesan client ke Room. */
 export class RoomManager {
@@ -189,7 +190,7 @@ export class RoomManager {
         room.setReady(playerId, !!msg.ready);
         break;
       case 'settings':
-        room.updateSettings(playerId, msg.boardPreset, msg.options, msg.fight);
+        room.updateSettings(playerId, msg.boardPreset, msg.options, msg.fight, msg.arena);
         break;
       case 'start_game':
         room.start(playerId);
@@ -216,6 +217,9 @@ export class RoomManager {
         if (sid) this.bindings.delete(sid);
         break;
       }
+      case 'use_item':
+        room.useItem(playerId, String(msg.item), msg.targetId === undefined ? undefined : String(msg.targetId));
+        break;
       case 'fight_progress':
         room.fightProgress(playerId, Number(msg.id), Number(msg.round), Number(msg.typed), !!msg.wrong);
         break;

@@ -1,3 +1,4 @@
+import type { ArenaEvent, TileItem } from './Arena';
 import type { ExpressionId, RoomInfo } from '../network/protocol';
 import type { Phase } from './StateMachine';
 
@@ -29,6 +30,16 @@ export interface GameEvents {
   /** duel online dimulai / selesai (yang kalah sudah kembali ke Start) */
   'fight:start': { fighters: string[] };
   'fight:end': { winnerId: string | null; losers: string[] };
+  /** arena: darah / tas / item di papan berubah */
+  'arena:update': Record<string, never>;
+  /** arena: kejadian (serang, pulih, item muncul) — sudah ditampilkan di papan 3D */
+  'arena:event': { ev: ArenaEvent };
+  /** arena: serangan diluncurkan / dipantulkan cermin / mengenai sasaran (untuk SFX & efek layar) */
+  'arena:launch': { ev: Extract<ArenaEvent, { kind: 'attack' }> };
+  'arena:reflect': { ev: Extract<ArenaEvent, { kind: 'attack' }> };
+  'arena:impact': { ev: Extract<ArenaEvent, { kind: 'attack' }> };
+  /** arena: pion tiba di petak ber-item dan item masuk tas */
+  'arena:pickup': { playerId: string; got: TileItem };
   /** ekspresi (emote + SFX) dari pemain atau penonton */
   expression: { playerId: string; name: string; spectator: boolean; id: ExpressionId };
 }

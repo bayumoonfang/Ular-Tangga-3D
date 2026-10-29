@@ -8,6 +8,21 @@ import type { GameState } from '../src/core/GameState';
 import { applyRoll, rollDie } from '../src/core/Rules';
 import { FIGHT_HIT_AT, fightDamage, judgeBeat, type ClientMsg, type RoomInfo, type ServerMsg } from '../src/network/protocol';
 import { createRng } from '../src/utils/random';
+import { BOARD_PRESETS } from '../src/config';
+import {
+  ARENA_HP,
+  ATTACK_ITEMS,
+  BAG_SIZE,
+  ITEM_MIN_GAP,
+  SHIELD_MAX,
+  SHIELD_PER_ITEM,
+  inReach,
+  isItem,
+  itemRange,
+  randomAttackItem,
+  spawnItems,
+  type ItemId,
+} from '../src/core/Arena';
 
 // jeda server dipercepat 100x agar permainan penuh selesai dalam detik
 process.env.SL3D_TIME_SCALE = '0.01';
@@ -783,5 +798,259 @@ describe('duel live di room', () => {
     v.send({ t: 'fight_progress', id: 1, round: 0, typed: 1 });
     expect((await v.wait('error', 2000, from)).message).toMatch(/Penonton/);
     [host, b, v].forEach((x) => x.close());
+  });
+});
+
+describe('mode arena', () => {
+  type ArenaInternals = {
+    hp: Record<string, number>;
+    shield: Record<string, number>;
+    bags: Record<string, string[]>;
+    tileItems: { tile: number; item: string }[];
+    respawns: unknown[];
+  };
+  const sleep = (n: number) => new Promise((r) => setTimeout(r, n));
+
+  async function arenaRoom(code: string) {
+    const { Room } = await import('../server/Room');
+    const inbox: ServerMsg[] = [];
+    const room = new Room(code, (sid, msg) => sid === 'sa' && inbox.push(msg), () => {});
+    const a = room.add('sa', 'Ana', 'kiko');
+    const b = room.add('sb', 'Budi', 'bobo');
+    room.setReady(b.id, true);
+    room.start(a.id);
+    const internals = room as unknown as { state: GameState; arena: ArenaInternals };
+    internals.state.board = { ladders: {}, snakes: {} };
+    await sleep(40); // intro (2500 ms × 0,01) selesai: pemain giliran pertama boleh beraksi
+    const s = internals.state;
+    const mover = s.players[s.current];
+    const other = s.players[1 - s.current];
+    const place = (moverTile: number, otherTile: number) => {
+      internals.state.players.find((p) => p.id === mover.id)!.position = moverTile;
+      internals.state.players.find((p) => p.id === other.id)!.position = otherTile;
+    };
+    return { room, inbox, arena: () => internals.arena, state: () => internals.state, mover, other, place };
+  }
+
+  function nextTarget(s: GameState, from: number): number {
+    const rng = createRng(1);
+    rng.setState(s.rngState);
+    return from + rollDie(rng, false);
+  }
+
+  const lastAttack = (inbox: ServerMsg[]) =>
+    (inbox.filter((m) => m.t === 'arena_event' && m.ev.kind === 'attack').pop() as Extract<ServerMsg, { t: 'arena_event' }>).ev;
+
+  it('item di papan tersebar berjauhan, bukan di petak 1/100, tangga, ular, atau pion', () => {
+    const board = BOARD_PRESETS.normal;
+    for (let i = 0; i < 50; i++) {
+      const items = spawnItems(createRng(1000 + i), board, [5, 40]);
+      expect(items.length).toBeGreaterThanOrEqual(4);
+      for (const c of items) {
+        expect(c.tile).toBeGreaterThan(1);
+        expect(c.tile).toBeLessThan(100);
+        expect([5, 40]).not.toContain(c.tile);
+        expect(board.ladders[c.tile]).toBeUndefined();
+        expect(board.snakes[c.tile]).toBeUndefined();
+        expect(isItem(c.item)).toBe(true);
+      }
+      for (const x of items) for (const y of items) if (x !== y) expect(Math.abs(x.tile - y.tile)).toBeGreaterThanOrEqual(ITEM_MIN_GAP);
+      const [extra] = spawnItems(createRng(7 + i), board, [], items, 1);
+      if (extra) for (const x of items) expect(Math.abs(x.tile - extra.tile)).toBeGreaterThanOrEqual(ITEM_MIN_GAP);
+    }
+  });
+
+  it('jarak serang per senjata: tinju 1, bom ≤3, panah ≤6, roket 2–12; petak sama & Start tidak berlaku', () => {
+    const reach = (item: ItemId, a: number, b: number) => {
+      const r = itemRange(item);
+      return inReach(a, b, r.max, r.min);
+    };
+    expect(reach('punch', 5, 6)).toBe(true);
+    expect(reach('punch', 5, 7)).toBe(false);
+    expect(reach('bomb', 5, 8)).toBe(true);
+    expect(reach('bomb', 5, 9)).toBe(false);
+    expect(reach('arrow', 20, 14)).toBe(true);
+    expect(reach('arrow', 20, 13)).toBe(false);
+    expect(reach('rocket', 10, 11)).toBe(false); // terlalu dekat untuk roket
+    expect(reach('rocket', 10, 22)).toBe(true);
+    expect(reach('rocket', 10, 23)).toBe(false);
+    expect(reach('bomb', 5, 5)).toBe(false);
+    expect(reach('bomb', 0, 2)).toBe(false);
+  });
+
+  it('modal awal: darah penuh, 1 senjata serang acak di tas + perisai', async () => {
+    const { room, inbox, mover } = await arenaRoom('ARN001');
+    const msg = inbox.find((m) => m.t === 'arena') as Extract<ServerMsg, { t: 'arena' }>;
+    expect(msg.arena.hp[mover.id]).toBe(ARENA_HP);
+    expect(msg.arena.shield[mover.id]).toBe(SHIELD_PER_ITEM);
+    expect(msg.arena.bags[mover.id]).toHaveLength(1);
+    expect(ATTACK_ITEMS).toContain(msg.arena.bags[mover.id][0]);
+    expect(msg.arena.tileItems.length).toBeGreaterThan(0);
+    // modal acak: dalam banyak pemain tidak selalu senjata yang sama
+    const seen = new Set<string>();
+    const rng = createRng(3);
+    for (let i = 0; i < 3000; i++) seen.add(randomAttackItem(rng));
+    expect(seen.size).toBe(ATTACK_ITEMS.length);
+    room.destroy();
+  });
+
+  it('berhenti di petak ber-item: masuk tas, hilang dari papan, muncul lagi 15 dtk kemudian', async () => {
+    const { room, inbox, arena, state, mover } = await arenaRoom('ARN002');
+    const s = state();
+    s.players.find((p) => p.id === mover.id)!.position = 10;
+    const target = nextTarget(s, 10);
+    const before = [...arena().bags[mover.id]];
+    arena().tileItems = [{ tile: target, item: 'potion' }];
+    room.handleRoll(mover.id);
+    const res = inbox.find((m) => m.t === 'turn_result') as Extract<ServerMsg, { t: 'turn_result' }>;
+    expect(res.pickup).toEqual({ tile: target, item: 'potion' });
+    expect(arena().bags[mover.id]).toEqual([...before, 'potion']);
+    expect(arena().tileItems).toHaveLength(0);
+    for (let i = 0; i < 100 && !inbox.some((m) => m.t === 'arena_event' && m.ev.kind === 'spawn'); i++) await sleep(10);
+    expect(inbox.some((m) => m.t === 'arena_event' && m.ev.kind === 'spawn')).toBe(true);
+    expect(arena().tileItems).toHaveLength(1);
+    room.destroy();
+  });
+
+  it('tas penuh: item biasa tidak bisa diambil; perisai tetap bisa (tanpa slot, menambah daya tahan)', async () => {
+    const { room, inbox, arena, state, mover } = await arenaRoom('ARN003');
+    const s = state();
+    s.players.find((p) => p.id === mover.id)!.position = 10;
+    const target = nextTarget(s, 10);
+    arena().bags[mover.id] = ['bomb', 'arrow', 'punch'];
+    arena().tileItems = [{ tile: target, item: 'mirror' }];
+    room.handleRoll(mover.id);
+    let res = inbox.find((m) => m.t === 'turn_result') as Extract<ServerMsg, { t: 'turn_result' }>;
+    expect(res.pickup).toBeUndefined();
+    expect(arena().bags[mover.id]).toHaveLength(BAG_SIZE);
+    expect(arena().tileItems).toEqual([{ tile: target, item: 'mirror' }]);
+
+    // perisai: diambil walau tas penuh, daya tahan maksimal SHIELD_MAX
+    const r = arena() as unknown as { pickup(id: string, tile: number): unknown };
+    arena().tileItems = [{ tile: 50, item: 'shield' }];
+    res = { ...res, pickup: r.pickup(mover.id, 50) as never };
+    expect(res.pickup).toEqual({ tile: 50, item: 'shield' });
+    expect(arena().shield[mover.id]).toBe(Math.min(SHIELD_MAX, SHIELD_PER_ITEM * 2));
+    expect(arena().bags[mover.id]).toHaveLength(BAG_SIZE);
+    room.destroy();
+  });
+
+  it('item dipakai = slot kosong; tidak bisa memakai item yang tidak ada di tas', async () => {
+    const { room, arena, other } = await arenaRoom('ARN004');
+    arena().bags[other.id] = ['potion', 'mirror', 'punch'];
+    expect(() => room.useItem(other.id, 'potion')).toThrow(/penuh/);
+    arena().hp[other.id] = 80;
+    room.useItem(other.id, 'potion');
+    expect(arena().hp[other.id]).toBe(ARENA_HP);
+    expect(arena().bags[other.id]).toEqual(['mirror', 'punch']);
+    expect(() => room.useItem(other.id, 'bomb')).toThrow(/tidak ada di tasmu/);
+    expect(() => room.useItem(other.id, 'mirror')).toThrow(/otomatis/);
+    room.destroy();
+  });
+
+  it('serangan: giliran sendiri & dalam jangkauan senjata; perisai menyerap damage', async () => {
+    const { room, inbox, arena, mover, other, place } = await arenaRoom('ARN005');
+    arena().bags[mover.id] = ['punch', 'rocket', 'bomb'];
+    place(30, 32);
+    expect(() => room.useItem(other.id, 'punch', mover.id)).toThrow(/giliranmu/);
+    expect(() => room.useItem(mover.id, 'punch', other.id)).toThrow(/jangkauan/);
+    expect(() => room.useItem(mover.id, 'rocket', other.id)).not.toThrow(); // jarak 2 → roket bisa
+    let ev = lastAttack(inbox);
+    expect(ev).toMatchObject({ outcome: 'hit', victimId: other.id, absorbed: 30, damage: 0, shieldBroken: false });
+    expect(arena().shield[other.id]).toBe(SHIELD_PER_ITEM - 30);
+    expect(arena().hp[other.id]).toBe(ARENA_HP);
+    expect(() => room.useItem(mover.id, 'bomb', other.id)).toThrow(/Satu serangan/);
+
+    // giliran berikutnya: bom 40 menghabiskan sisa perisai 30, 10 mengenai darah
+    const s = (room as unknown as { state: GameState }).state;
+    s.turn += 1;
+    room.useItem(mover.id, 'bomb', other.id);
+    ev = lastAttack(inbox);
+    expect(ev).toMatchObject({ absorbed: 30, damage: 10, shieldBroken: true });
+    expect(arena().shield[other.id]).toBe(0);
+    expect(arena().hp[other.id]).toBe(ARENA_HP - 10);
+    room.destroy();
+  });
+
+  it('petir menembus perisai; meteor hanya jarak jauh (5–25)', async () => {
+    const { room, inbox, arena, mover, other, place } = await arenaRoom('ARN008');
+    const s = (room as unknown as { state: GameState }).state;
+    arena().bags[mover.id] = ['lightning', 'meteor'];
+    place(20, 27);
+    room.useItem(mover.id, 'lightning', other.id);
+    expect(lastAttack(inbox)).toMatchObject({ absorbed: 0, damage: 20, shieldBroken: false });
+    expect(arena().shield[other.id]).toBe(SHIELD_PER_ITEM);
+    expect(arena().hp[other.id]).toBe(ARENA_HP - 20);
+    s.turn += 1;
+    place(20, 23);
+    expect(() => room.useItem(mover.id, 'meteor', other.id)).toThrow(/jangkauan/);
+    place(20, 45);
+    room.useItem(mover.id, 'meteor', other.id);
+    expect(lastAttack(inbox)).toMatchObject({ absorbed: 45, damage: 0 });
+    room.destroy();
+  });
+
+  it('roket menyerang dari jauh; darah habis = kembali ke petak 1 dengan darah penuh', async () => {
+    const { room, inbox, arena, state, mover, other, place } = await arenaRoom('ARN006');
+    arena().bags[mover.id] = ['rocket'];
+    place(20, 32);
+    arena().shield[other.id] = 0;
+    arena().hp[other.id] = 25;
+    room.useItem(mover.id, 'rocket', other.id);
+    expect(lastAttack(inbox)).toMatchObject({ kind: 'attack', outcome: 'hit', damage: 30, ko: other.id });
+    expect(state().players.find((p) => p.id === other.id)!.position).toBe(1);
+    expect(arena().hp[other.id]).toBe(ARENA_HP);
+    room.destroy();
+  });
+
+  it('cermin memantulkan serangan ke penyerang (perisai penyerang ikut menyerap)', async () => {
+    const { room, inbox, arena, mover, other, place } = await arenaRoom('ARN007');
+    arena().bags[mover.id] = ['bomb'];
+    arena().bags[other.id] = ['mirror'];
+    place(12, 14);
+    room.useItem(mover.id, 'bomb', other.id);
+    expect(lastAttack(inbox)).toMatchObject({ outcome: 'reflected', victimId: mover.id, absorbed: 40, damage: 0 });
+    expect(arena().bags[other.id]).toEqual([]);
+    expect(arena().shield[mover.id]).toBe(SHIELD_PER_ITEM - 40);
+    expect(arena().shield[other.id]).toBe(SHIELD_PER_ITEM);
+    room.destroy();
+  });
+
+  it('pemain baru yang mengisi slot kosong mendapat modal arena', async () => {
+    const [host, b, c] = await startGame(3);
+    host.send({ t: 'kick', playerId: c.me });
+    await c.wait('kicked');
+    const d = await open();
+    d.send({ t: 'join_room', code: host.room!.code, name: 'Dodi', character: 'kiko' });
+    const joined = await d.wait('joined');
+    const arena = await d.wait('arena');
+    expect(arena.arena.bags[joined.you]).toHaveLength(1);
+    expect(arena.arena.shield[joined.you]).toBe(SHIELD_PER_ITEM);
+    expect(arena.arena.hp[joined.you]).toBe(ARENA_HP);
+    expect(arena.arena.bags[c.me]).toBeUndefined();
+    [host, b, c, d].forEach((x) => x.close());
+  });
+});
+
+describe('opsi mode arena', () => {
+  it('host bisa mematikan Mode Arena: tanpa darah & item, permainan biasa', async () => {
+    const [host, b] = await makeRoom(2);
+    expect(host.room!.settings.arena).toBe(true); // bawaan aktif
+    b.send({ t: 'settings', arena: false });
+    expect((await b.wait('error')).message).toMatch(/host/);
+    host.send({ t: 'settings', arena: false });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(b.room!.settings.arena).toBe(false);
+    b.send({ t: 'ready', ready: true });
+    await new Promise((r) => setTimeout(r, 50));
+    host.send({ t: 'start_game' });
+    await host.wait('game_start');
+    const res = await host.wait('turn_result', 3000); // AFK = dilempar otomatis
+    expect(res.pickup).toBeUndefined();
+    expect(host.msgs.some((m) => m.t === 'arena' || m.t === 'arena_event')).toBe(false);
+    const from = host.msgs.length;
+    host.send({ t: 'use_item', item: 'potion' });
+    expect((await host.wait('error', 2000, from)).message).toMatch(/Mode Arena/);
+    [host, b].forEach((x) => x.close());
   });
 });

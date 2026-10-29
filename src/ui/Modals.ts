@@ -86,7 +86,7 @@ export class HowToPlay extends Modal {
         'div',
         { class: 'modal-card' },
         h('h2', null, icon('help'), t('howto.title')),
-        h('ol', { class: 'howto' }, ...[1, 2, 3, 4, 5, 6, 7, 8].map((n) => h('li', null, t(`howto.${n}`)))),
+        h('ol', { class: 'howto' }, ...[1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) => h('li', null, t(`howto.${n}`)))),
         h('button', { class: 'btn primary', onclick: () => this.hide() }, t('howto.close')),
       ),
     );
